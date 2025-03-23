@@ -26,12 +26,12 @@ type Client struct {
 // as well as optional params e.g. filter=transactionStatus:{PAYOUT}
 // A list of APIs and their rate limits:
 // https://developer.ebay.com/develop/get-started/api-call-limits
-func (c *Client) get(
+func (c *Client) request(
 	ctx context.Context,
 	url string, // embed struct?
 	op string,
 	params map[string]string,
-) error {
+) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
@@ -40,11 +40,20 @@ func (c *Client) get(
 	)
 
 	if err != nil {
-		return fmt.Errorf("failed to make new request; %w", err)
+		return nil, fmt.Errorf("failed to make new request; %w", err)
 	}
 
 	q := req.URL.Query()
 	q.Set("Operation-Name", op)
+	q.Set("Service-Version", "1.0.0")
+	q.Set("Security-AppName", c.AppID)
+	q.Set("Response-Data-Format", "JSON")
+	q.Set("REST-Payload", "")
+	for k, v := range params {
+		if v != "" {
+			q.Set(k, v)
+		}
+	}
 
-	return nil
+	return req, err
 }

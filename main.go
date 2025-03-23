@@ -1,17 +1,22 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
+
+	"github.tesla.com/chrzhang/sealift/ebay"
 )
 
 var (
 	verificationToken = os.Getenv("VERIFICATION_TOKEN")
 	endpointURL       = os.Getenv("ENDPOINT_URL")
+	appId             = os.Getenv("EBAY_APP_ID")
 	certPath          = "/root/cert/sealift.crt"
 	keyPath           = "/root/cert/sealift.key"
 	port              = os.Getenv("PORT")
@@ -28,11 +33,24 @@ func main() {
 		return
 	}
 
-	http.HandleFunc("/sealift-webhook", notificationHandler)
+	ctx := context.Background()
+
+	// make eBay client
+	client := &ebay.Client{
+		Client: &http.Client{Timeout: time.Second * 5},
+		AppID:  appId,
+	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		slog.Info("received request at /", "path", r.URL.Path)
 		http.Error(w, "Not Found", http.StatusNotFound)
+	})
+
+	http.HandleFunc("/sealift-webhook", notificationHandler)
+
+	http.HandleFunc("/get-transaction-summary", func(w http.ResponseWriter, r *http.Request) {
+		slog.Info("received request at /get-transaction-summary", "path", r.URL.Path)
+		client.GetTransactionSummary(ctx)
 	})
 
 	slog.Info("starting server", "port", port)
