@@ -45,4 +45,6 @@ func (c *Client) get(
 
 	q := req.URL.Query()
 	q.Set("Operation-Name", op)
+
+	return nil
 }
