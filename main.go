@@ -6,24 +6,38 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 )
 
-const (
-	port = ":443"
+var (
+	verificationToken = os.Getenv("VERIFICATION_TOKEN")
+	endpointURL       = os.Getenv("ENDPOINT_URL")
+	certPath          = "/root/cert/sealift.crt"
+	keyPath           = "/root/cert/sealift.key"
+	port              = os.Getenv("PORT")
 )
 
-// ChallengeResponse struct for the verification response
+// ChallengeResponse for the verification response.
 type ChallengeResponse struct {
 	ChallengeResponse string `json:"challengeResponse"`
 }
 
 func main() {
-	http.HandleFunc("/ebay-notifications", notificationHandler)
+	if verificationToken == "" || endpointURL == "" {
+		slog.Error("verification token and/or URL must be set")
+		return
+	}
+
+	http.HandleFunc("/sealift-webhook", notificationHandler)
+
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		slog.Info("received request at /", "path", r.URL.Path)
+		http.Error(w, "Not Found", http.StatusNotFound)
+	})
 
 	slog.Info("starting server", "port", port)
 
-	// TLS for HTTPS
-	err := http.ListenAndServeTLS(port, serverCrt, serverKey, nil)
+	err := http.ListenAndServeTLS(port, certPath, keyPath, nil)
 	if err != nil {
 		slog.Error("server failed", "err", err)
 	}
@@ -46,6 +60,8 @@ func notificationHandler(w http.ResponseWriter, r *http.Request) {
 		hash := sha256.Sum256([]byte(hashInput))
 		hashString := fmt.Sprintf("%x", hash)
 
+		slog.Info("computed hash for challenge code", "url", endpointURL)
+
 		resp := ChallengeResponse{ChallengeResponse: hashString}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -61,7 +77,7 @@ func notificationHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		slog.Info("received deletion notification; %v", notif)
+		slog.Info("received deletion notification", "notif", notif)
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "OK")
 
