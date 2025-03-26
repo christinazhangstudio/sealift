@@ -10,16 +10,19 @@ import (
 	"os"
 	"time"
 
+	"github.tesla.com/chrzhang/sealift/auth"
 	"github.tesla.com/chrzhang/sealift/ebay"
 )
 
 var (
-	verificationToken = os.Getenv("VERIFICATION_TOKEN")
-	endpointURL       = os.Getenv("ENDPOINT_URL")
-	appId             = os.Getenv("EBAY_APP_ID")
-	certPath          = "/root/cert/sealift.crt"
-	keyPath           = "/root/cert/sealift.key"
-	port              = os.Getenv("PORT")
+	verificationToken   = os.Getenv("VERIFICATION_TOKEN")
+	endpointURL         = os.Getenv("ENDPOINT_URL") // for notifications
+	clientID            = os.Getenv("EBAY_CLIENT_ID")
+	clientSecret        = os.Getenv("EBAY_CLIENT_SECRET")
+	ebayURL             = os.Getenv("EBAY_URL")
+	ebayAuthURL         = os.Getenv("EBAY_AUTH_URL")
+	ebayAuthRedirectURI = os.Getenv("EBAY_AUTH_REDIRECT_URI")
+	port                = os.Getenv("PORT")
 )
 
 // ChallengeResponse for the verification response.
@@ -35,10 +38,16 @@ func main() {
 
 	ctx := context.Background()
 
-	// make eBay client
+	// client to make HTTP requests to eBay APIs.
 	client := &ebay.Client{
 		Client: &http.Client{Timeout: time.Second * 5},
-		AppID:  appId,
+		URL:    ebayURL,
+		Auth: &auth.Client{
+			AuthURL:      ebayAuthURL,
+			RedirectURI:  ebayAuthRedirectURI,
+			ClientID:     clientID,
+			ClientSecret: clientSecret,
+		},
 	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -48,14 +57,32 @@ func main() {
 
 	http.HandleFunc("/sealift-webhook", notificationHandler)
 
+	// on-behalf flow for user token
+	http.HandleFunc("/auth-callback", func(w http.ResponseWriter, r *http.Request) {
+		authCode := r.URL.Query().Get("code")
+		if authCode == "" {
+			http.Error(w, "missing auth code", http.StatusBadRequest)
+			return
+		}
+
+		slog.Info("received auth code in callback")
+
+		fmt.Fprintf(w, "token stored for seller")
+	})
+
 	http.HandleFunc("/get-transaction-summary", func(w http.ResponseWriter, r *http.Request) {
-		slog.Info("received request at /get-transaction-summary", "path", r.URL.Path)
-		client.GetTransactionSummary(ctx)
+		for user := range client.Auth.GetUsers() {
+			ctx = context.WithValue(context.Background(), auth.USER, user)
+			err := client.GetTransactionSummary(ctx)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+		}
 	})
 
 	slog.Info("starting server", "port", port)
 
-	err := http.ListenAndServeTLS(port, certPath, keyPath, nil)
+	err := http.ListenAndServe(port, nil)
 	if err != nil {
 		slog.Error("server failed", "err", err)
 	}
