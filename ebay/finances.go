@@ -23,7 +23,7 @@ import (
 // https://apiz.ebay.com/sell/finances/v1/transaction_summary?filter=transactionStatus:{PAYOUT}
 
 const (
-	financesUrl = "https://apiz.ebay.com/sell/finances/v1"
+	financesAPI = "/sell/finances/v1"
 )
 
 // type Storefront struct {
@@ -38,7 +38,7 @@ func (c *Client) GetTransactionSummary(
 	params := map[string]string{
 		"filter": "transactionStatus:{PAYOUT}",
 	}
-	req, err := c.request(ctx, financesUrl, "transaction_summary", params)
+	req, err := c.request(ctx, financesAPI, "transaction_summary", params)
 
 	resp, err := c.Do(req)
 	if err != nil {

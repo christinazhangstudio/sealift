@@ -9,7 +9,5 @@ go build -o sealift-webhook .
 FROM alpine:latest
 WORKDIR /root/
 COPY --from=builder /app/sealift-webhook .
-COPY cert/sealift.crt cert/
-COPY cert/sealift.key cert/
 EXPOSE 443
 CMD ["./sealift-webhook"]

@@ -4,22 +4,22 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+
+	"github.tesla.com/chrzhang/sealift/auth"
 )
 
-// EbayClient interacts with eBay APIs.
+// Client interacts with eBay APIs.
 type Client struct {
-	// Client is the HTTP client used to make requests to the eBay Finding API.
+	// Client is the HTTP client that makes requests to eBay APIs.
 	*http.Client
 
-	// AppID is the eBay application ID.
-	// https://developer.ebay.com/api-docs/static/gs_create-the-ebay-api-keysets.html.
-	AppID string
-
 	// URL specifies the API endpoint.
-	//
-	// URL defaults to the eBay Production API Gateway URI, but can be changed to
-	// the eBay Sandbox endpoint or localhost for testing purposes.
-	//URL string
+	// https://apiz.ebay.com for prod
+	// https://api.sandbox.ebay.com for sandbox
+	URL string
+
+	// Auth contains auth-related functions.
+	Auth *auth.Client
 }
 
 // Takes an operation e.g. transaction_summary
@@ -28,14 +28,19 @@ type Client struct {
 // https://developer.ebay.com/develop/get-started/api-call-limits
 func (c *Client) request(
 	ctx context.Context,
-	url string, // embed struct?
+	api string,
 	op string,
 	params map[string]string,
 ) (*http.Request, error) {
+	token, err := c.Auth.GetToken(ctx.Value(auth.USER).(string))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get or refresh user token; %w", err)
+	}
+
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
-		url,
+		c.URL+api,
 		nil,
 	)
 
@@ -45,10 +50,15 @@ func (c *Client) request(
 
 	q := req.URL.Query()
 	q.Set("Operation-Name", op)
-	q.Set("Service-Version", "1.0.0")
-	q.Set("Security-AppName", c.AppID)
-	q.Set("Response-Data-Format", "JSON")
-	q.Set("REST-Payload", "")
+	// q.Set("Service-Version", "1.0.0")
+	// q.Set("Security-AppName", c.AppID)
+	// q.Set("Response-Data-Format", "JSON")
+	// q.Set("REST-Payload", "")
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
 	for k, v := range params {
 		if v != "" {
 			q.Set(k, v)
