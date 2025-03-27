@@ -38,7 +38,12 @@ func (c *Client) GetTransactionSummary(
 	params := map[string]string{
 		"filter": "transactionStatus:{PAYOUT}",
 	}
-	req, err := c.request(ctx, financesAPI, "transaction_summary", params)
+	req, err := c.request(
+		ctx,
+		financesAPI,
+		"transaction_summary",
+		params,
+	)
 
 	resp, err := c.Do(req)
 	if err != nil {
