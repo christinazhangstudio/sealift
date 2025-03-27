@@ -18,6 +18,10 @@ import (
 
 const USER = "user"
 
+const (
+	userAPI = "https://apiz.ebay.com/commerce/identity/v1/user/"
+)
+
 type Client struct {
 	// AuthURL specifies the OAuth token request endpoints.
 	// Note that the prod URL is not quite the same as the API endpoint.
@@ -51,6 +55,10 @@ type token struct {
 	expiresAt    time.Time
 }
 
+func MakeSellersMap() *Sellers {
+	return &Sellers{sync.Mutex{}, make(map[string]*token, 0)}
+}
+
 // GetUsers returns all the users this app has registered.
 func (c *Client) GetUsers() []string {
 	return slices.Sorted(maps.Keys(c.Sellers.tokens))
@@ -63,7 +71,7 @@ func (c *Client) AuthUser(authCode string) error {
 		return fmt.Errorf("failed to get user token; %w", err)
 	}
 
-	user, err := c.getUser(tokenResp.AccessToken)
+	user, err := getUser(tokenResp.AccessToken)
 	if err != nil {
 		return fmt.Errorf("failed to get user; %w", err)
 	}
@@ -82,6 +90,8 @@ func (c *Client) AuthUser(authCode string) error {
 		refreshToken: tokenResp.RefreshToken,
 		expiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
 	}
+
+	slog.Info("authorized new user", "user", user)
 
 	return nil
 }
@@ -162,19 +172,20 @@ type UserResponse struct {
 	Username string `json:"username"`
 }
 
-// GetUser gets the identity associated with an access token.
+// getUser gets the identity associated with an access token.
 // This allows multiple users to use the app under their context.
 // https://developer.ebay.com/api-docs/commerce/identity/overview.html
 // Used for initial auth flow through the redirect URI.
-func (c *Client) getUser(accessToken string) (string, error) {
+func getUser(accessToken string) (string, error) {
 	req, err := http.NewRequest(
 		"GET",
-		"",
+		userAPI,
 		nil,
 	)
 	if err != nil {
-		return "", fmt.Errorf("failed to get user; %w", err)
+		return "", fmt.Errorf("failed to make request for user; %w", err)
 	}
+
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -209,7 +220,7 @@ func (c *Client) GetToken(user string) (string, error) {
 	}
 
 	if time.Until(token.expiresAt) < 5*time.Minute {
-		slog.Info("found expired/expiring token; refreshing")
+		slog.Info("found expired/expiring token; refreshing", "user", user)
 		newToken, err := c.refreshToken(token.refreshToken)
 		if err != nil {
 			return "", fmt.Errorf("failed to refresh token; %w", err)

@@ -47,6 +47,7 @@ func main() {
 			RedirectURI:  ebayAuthRedirectURI,
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
+			Sellers:      auth.MakeSellersMap(),
 		},
 	}
 
@@ -61,21 +62,31 @@ func main() {
 	http.HandleFunc("/auth-callback", func(w http.ResponseWriter, r *http.Request) {
 		authCode := r.URL.Query().Get("code")
 		if authCode == "" {
+			slog.Error("missing auth code")
 			http.Error(w, "missing auth code", http.StatusBadRequest)
 			return
 		}
 
 		slog.Info("received auth code in callback")
 
-		fmt.Fprintf(w, "token stored for seller")
+		err := client.Auth.AuthUser(authCode)
+		if err != nil {
+			slog.Error("failed to auth user", "err", err)
+			http.Error(w, "failed to auth user", http.StatusInternalServerError)
+			return
+		}
+
+		fmt.Fprintf(w, "seller authorized to service")
 	})
 
 	http.HandleFunc("/get-transaction-summary", func(w http.ResponseWriter, r *http.Request) {
 		for user := range client.Auth.GetUsers() {
-			ctx = context.WithValue(context.Background(), auth.USER, user)
+			ctx = context.WithValue(ctx, auth.USER, user)
 			err := client.GetTransactionSummary(ctx)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				slog.Error("failed to get transaction summary", "err", err)
+				http.Error(w, "failed to get transaction summary", http.StatusInternalServerError)
+				return
 			}
 		}
 	})
