@@ -80,14 +80,20 @@ func main() {
 	})
 
 	http.HandleFunc("/get-transaction-summary", func(w http.ResponseWriter, r *http.Request) {
-		for user := range client.Auth.GetUsers() {
+		for _, user := range client.Auth.GetUsers() {
 			ctx = context.WithValue(ctx, auth.USER, user)
-			err := client.GetTransactionSummary(ctx)
+			summary, err := client.GetTransactionSummary(ctx)
 			if err != nil {
-				slog.Error("failed to get transaction summary", "err", err)
+				slog.Error(
+					"failed to get transaction summary",
+					"err", err,
+					"user", user,
+				)
 				http.Error(w, "failed to get transaction summary", http.StatusInternalServerError)
 				return
 			}
+
+			fmt.Fprintf(w, "%+v", summary)
 		}
 	})
 

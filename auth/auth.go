@@ -178,7 +178,7 @@ type UserResponse struct {
 // Used for initial auth flow through the redirect URI.
 func getUser(accessToken string) (string, error) {
 	req, err := http.NewRequest(
-		"GET",
+		http.MethodGet,
 		userAPI,
 		nil,
 	)
