@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -22,6 +23,7 @@ var (
 	ebayURL             = os.Getenv("EBAY_URL")
 	ebayAuthURL         = os.Getenv("EBAY_AUTH_URL")
 	ebayAuthRedirectURI = os.Getenv("EBAY_AUTH_REDIRECT_URI")
+	ebaySignIn          = os.Getenv("EBAY_SIGN_IN")
 	port                = os.Getenv("PORT")
 )
 
@@ -58,8 +60,24 @@ func main() {
 
 	http.HandleFunc("/sealift-webhook", notificationHandler)
 
+	// user auth and consent page
+	// auth-accepted URL is auth-callback
+	// https://developer.ebay.com/api-docs/static/oauth-consent-request.html
+	http.HandleFunc("/api/register-seller", func(w http.ResponseWriter, r *http.Request) {
+		params := url.Values{}
+		params.Set("client_id", client.Auth.ClientID)
+		params.Set("redirect_uri", client.Auth.RedirectURI)
+		params.Set("response_type", "code")
+		// scopes provided in URL already
+
+		ebaySignIn := ebaySignIn + "?" + params.Encode()
+
+		slog.Info("using", "url", ebaySignIn)
+		http.Redirect(w, r, ebaySignIn, http.StatusFound)
+	})
+
 	// on-behalf flow for user token
-	http.HandleFunc("/auth-callback", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/auth-callback", func(w http.ResponseWriter, r *http.Request) {
 		authCode := r.URL.Query().Get("code")
 		if authCode == "" {
 			slog.Error("missing auth code")
@@ -79,7 +97,7 @@ func main() {
 		fmt.Fprintf(w, "seller authorized to service")
 	})
 
-	http.HandleFunc("/get-transaction-summary", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/api/get-transaction-summary", func(w http.ResponseWriter, r *http.Request) {
 		for _, user := range client.Auth.GetUsers() {
 			ctx = context.WithValue(ctx, auth.USER, user)
 			summary, err := client.GetTransactionSummary(ctx)
