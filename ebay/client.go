@@ -40,20 +40,14 @@ func (c *Client) request(
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
-		c.URL+api,
+		c.URL+api+op,
 		nil,
 	)
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to make new request; %w", err)
 	}
 
 	q := req.URL.Query()
-	q.Set("Operation-Name", op)
-	// q.Set("Service-Version", "1.0.0")
-	// q.Set("Security-AppName", c.AppID)
-	// q.Set("Response-Data-Format", "JSON")
-	// q.Set("REST-Payload", "")
 
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -65,5 +59,7 @@ func (c *Client) request(
 		}
 	}
 
-	return req, err
+	req.URL.RawQuery = q.Encode()
+
+	return req, nil
 }
