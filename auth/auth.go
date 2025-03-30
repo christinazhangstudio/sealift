@@ -76,13 +76,6 @@ func (c *Client) AuthUser(authCode string) error {
 		return fmt.Errorf("failed to get user; %w", err)
 	}
 
-	// allow user to auth again?
-	_, exists := c.Sellers.tokens[user]
-	if exists {
-		// unexpected... user hit the auth callback?
-		return fmt.Errorf("found token for seller %s", user)
-	}
-
 	c.Sellers.Lock()
 	defer c.Sellers.Unlock()
 	c.Sellers.tokens[user] = &token{
