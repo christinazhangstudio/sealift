@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"time"
 
@@ -64,16 +63,8 @@ func main() {
 	// auth-accepted URL is auth-callback
 	// https://developer.ebay.com/api-docs/static/oauth-consent-request.html
 	http.HandleFunc("/api/register-seller", func(w http.ResponseWriter, r *http.Request) {
-		params := url.Values{}
-		params.Set("client_id", client.Auth.ClientID)
-		params.Set("redirect_uri", client.Auth.RedirectURI)
-		params.Set("response_type", "code")
-		// scopes provided in URL already
-
-		ebaySignIn := ebaySignIn + "?" + params.Encode()
-
-		slog.Info("using", "url", ebaySignIn)
-		http.Redirect(w, r, ebaySignIn, http.StatusFound)
+		slog.Info("redirecting to oauth consent page")
+		http.Redirect(w, r, ebaySignIn, http.StatusTemporaryRedirect)
 	})
 
 	// on-behalf flow for user token
