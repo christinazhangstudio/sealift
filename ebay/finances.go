@@ -79,6 +79,9 @@ func (c *Client) GetTransactionSummary(
 		"transaction_summary",
 		params,
 	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request; %w", err)
+	}
 
 	resp, err := c.Do(req)
 	if err != nil {
