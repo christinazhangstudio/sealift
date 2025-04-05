@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.tesla.com/chrzhang/sealift/auth"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 // Client interacts with eBay APIs.
@@ -13,12 +14,19 @@ type Client struct {
 	// Client is the HTTP client that makes requests to eBay APIs.
 	*http.Client
 
+	// DB client
+	// would be a singleton (only bc there are no tests and this is thread safe :9)
+	// but cyclic dependency (and db pkg not needed)
+	DB *mongo.Collection
+
 	// URL specifies the API endpoint.
 	// https://apiz.ebay.com for prod
 	// https://api.sandbox.ebay.com for sandbox
 	URL string
 
 	// Auth contains auth-related functions.
+	// Used for loading in the respective user
+	// token at API request time.
 	Auth *auth.Client
 }
 
@@ -32,7 +40,7 @@ func (c *Client) request(
 	op string,
 	params map[string]string,
 ) (*http.Request, error) {
-	token, err := c.Auth.GetToken(ctx.Value(auth.USER).(string))
+	token, err := c.Auth.GetToken(ctx, ctx.Value(auth.USER).(string))
 	if err != nil {
 		return nil, fmt.Errorf("failed to get or refresh user token; %w", err)
 	}

@@ -1,28 +1,44 @@
 package auth
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
-	"sync"
 	"time"
+
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-const USER = "user"
+const (
+	USER = "user"
+
+	timezone = "America/Chicago"
+)
 
 const (
 	userAPI = "https://apiz.ebay.com/commerce/identity/v1/user/"
 )
 
 type Client struct {
+	// HTTP client for making auth related API calls.
+	*http.Client
+
+	// DB client
+	// would be a singleton (only bc there are no tests and this is thread safe :9)
+	// but cyclic dependency
+	DB *mongo.Collection
+
 	// AuthURL specifies the OAuth token request endpoints.
 	// Note that the prod URL is not quite the same as the API endpoint.
 	// https://api.ebay.com/identity/v1/oauth2/token for prod
@@ -36,53 +52,91 @@ type Client struct {
 	// https://developer.ebay.com/api-docs/static/gs_create-the-ebay-api-keysets.html.
 	ClientID string
 
-	// ClientSecret
+	// ClientSecret is the eBay application secret.
 	ClientSecret string
-
-	Sellers *Sellers
 }
 
-// Sellers manages tokens for multiple sellers.
-type Sellers struct {
-	sync.Mutex
-	tokens map[string]*token
-}
-
-// token represents an OAuth token.
-type token struct {
-	accessToken  string
-	refreshToken string
-	expiresAt    time.Time
-}
-
-func MakeSellersMap() *Sellers {
-	return &Sellers{sync.Mutex{}, make(map[string]*token, 0)}
+// UserDocument represents a document associating user with their OAuth token.
+// if bson tag is not specified, mongo driver uses lowercase of the field name,
+// but bson tags are useful if struct fields are renamed and thereby save some
+// inconsistency issues at no functional cost.
+type UserTokenDocument struct {
+	User         string `bson:"user"`
+	AccessToken  string `bson:"access_token"`
+	RefreshToken string `bson:"refresh_token"`
+	ExpiresAt    string `bson:"expires_at,omitempty"`
 }
 
 // GetUsers returns all the users this app has registered.
-func (c *Client) GetUsers() []string {
-	return slices.Sorted(maps.Keys(c.Sellers.tokens))
+func (c *Client) GetUsers(ctx context.Context) ([]string, error) {
+	var users []string
+	undec, err := c.DB.Distinct(ctx, "user", bson.D{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get users; %w", err)
+	}
+
+	for _, u := range undec {
+		if user, ok := u.(string); ok {
+			users = append(users, user)
+		} else {
+			return nil, fmt.Errorf("unexpected type for name: %T", u)
+		}
+	}
+
+	// sorted for UI purposes
+	slices.Sort(users)
+	return users, nil
 }
 
 // AuthUser is the initial flow when a user consents through auth-callback.
-func (c *Client) AuthUser(authCode string) error {
+func (c *Client) AuthUser(ctx context.Context, authCode string) error {
 	tokenResp, err := c.getUserToken(authCode)
 	if err != nil {
 		return fmt.Errorf("failed to get user token; %w", err)
 	}
 
-	user, err := getUser(tokenResp.AccessToken)
+	user, err := c.getUser(tokenResp.AccessToken)
 	if err != nil {
 		return fmt.Errorf("failed to get user; %w", err)
 	}
 
-	c.Sellers.Lock()
-	defer c.Sellers.Unlock()
-	c.Sellers.tokens[user] = &token{
-		accessToken:  tokenResp.AccessToken,
-		refreshToken: tokenResp.RefreshToken,
-		expiresAt:    time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+	// c.Sellers.Lock()
+	// defer c.Sellers.Unlock()
+	// c.Sellers.tokens[user] = &token{
+	// 	accessToken:  tokenResp.AccessToken,
+	// 	refreshToken: tokenResp.RefreshToken,
+	// 	expiresAt:    time.Now().In(loc).Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+	// }
+
+	loc, err := time.LoadLocation(timezone)
+	if err != nil {
+		return fmt.Errorf("failed to load timezone: %w", err)
 	}
+
+	expiresAt := time.Now().In(loc).Add(time.Duration(tokenResp.ExpiresIn) * time.Second).String()
+
+	filter := bson.D{{Key: "user", Value: user}}
+	update := bson.M{
+		"$set": UserTokenDocument{
+			User:         user,
+			AccessToken:  tokenResp.AccessToken,
+			RefreshToken: tokenResp.RefreshToken,
+			ExpiresAt:    expiresAt,
+		},
+	}
+
+	// upsert allows insert if not exist
+	opts := options.Update().SetUpsert(true)
+	result, err := c.DB.UpdateOne(ctx, filter, update, opts)
+	if err != nil {
+		return fmt.Errorf("failed to insert user; %w", err)
+	}
+	slog.Info(
+		"upserted user token document",
+		"matched", result.MatchedCount,
+		"modified", result.ModifiedCount,
+		"upserted_id", result.UpsertedID,
+	)
 
 	slog.Info("authorized new user", "user", user)
 
@@ -123,8 +177,7 @@ func (c *Client) getUserToken(authCode string) (*TokenResponse, error) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Authorization", "Basic "+auth)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := c.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to request token endpoint; %w", err)
 	}
@@ -169,7 +222,7 @@ type UserResponse struct {
 // This allows multiple users to use the app under their context.
 // https://developer.ebay.com/api-docs/commerce/identity/overview.html
 // Used for initial auth flow through the redirect URI.
-func getUser(accessToken string) (string, error) {
+func (c *Client) getUser(accessToken string) (string, error) {
 	req, err := http.NewRequest(
 		http.MethodGet,
 		userAPI,
@@ -183,8 +236,7 @@ func getUser(accessToken string) (string, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := c.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to do request for user; %w", err)
 	}
@@ -203,27 +255,81 @@ func getUser(accessToken string) (string, error) {
 }
 
 // getToken gets or refreshes a OAuth user token associated with a particular user.
-func (c *Client) GetToken(user string) (string, error) {
-	c.Sellers.Lock()
-	defer c.Sellers.Unlock()
+// func (c *Client) GetToken(user string) (string, error) {
+// 	c.Sellers.Lock()
+// 	defer c.Sellers.Unlock()
 
-	token, exists := c.Sellers.tokens[user]
-	if !exists {
-		return "", fmt.Errorf("no token for seller %s", user)
+// 	token, exists := c.Sellers.tokens[user]
+// 	if !exists {
+// 		return "", fmt.Errorf("no token for seller %s", user)
+// 	}
+
+// 	if time.Until(token.expiresAt) < 5*time.Minute {
+// 		slog.Info("found expired/expiring token; refreshing", "user", user)
+// 		newToken, err := c.refreshToken(token.refreshToken)
+// 		if err != nil {
+// 			return "", fmt.Errorf("failed to refresh token; %w", err)
+// 		}
+// 		token.accessToken = newToken.AccessToken
+// 		token.refreshToken = newToken.RefreshToken
+// 		token.expiresAt = time.Now().Add(time.Duration(newToken.ExpiresIn) * time.Second)
+// 	}
+
+// 	return token.accessToken, nil
+// }
+
+func (c *Client) GetToken(ctx context.Context, user string) (string, error) {
+	filter := bson.D{{Key: "user", Value: user}}
+	var token UserTokenDocument
+	err := c.DB.FindOne(ctx, filter).Decode(&token)
+	if err != nil {
+		return "", fmt.Errorf("failed to find token for user; %w", err)
 	}
 
-	if time.Until(token.expiresAt) < 5*time.Minute {
-		slog.Info("found expired/expiring token; refreshing", "user", user)
-		newToken, err := c.refreshToken(token.refreshToken)
+	loc, err := time.LoadLocation(timezone)
+	if err != nil {
+		return "", fmt.Errorf("failed to load timezone: %w", err)
+	}
+
+	layout := "2006-01-02 15:04:05.000000000 -0700 CDT"
+	parsedTime, err := time.ParseInLocation(layout, token.ExpiresAt, loc)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse time; %w", err)
+	}
+
+	now := time.Now().In(loc)
+	if parsedTime.Sub(now) < 5*time.Minute {
+		slog.Info(
+			"found expired/expiring token; refreshing",
+			"user", user,
+			"time_left_or_already_elapsed_if_neg", parsedTime.Sub(now),
+		)
+		newToken, err := c.refreshToken(token.RefreshToken)
 		if err != nil {
 			return "", fmt.Errorf("failed to refresh token; %w", err)
 		}
-		token.accessToken = newToken.AccessToken
-		token.refreshToken = newToken.RefreshToken
-		token.expiresAt = time.Now().Add(time.Duration(newToken.ExpiresIn) * time.Second)
+
+		// update document, refresh token remains the same
+		newExpiresAt := time.Now().In(loc).Add(time.Duration(newToken.ExpiresIn) * time.Second).String()
+		filter := bson.D{{Key: "user", Value: user}}
+		update := bson.M{
+			"$set": UserTokenDocument{
+				User:        user,
+				AccessToken: newToken.AccessToken,
+				ExpiresAt:   newExpiresAt,
+			},
+		}
+
+		result := c.DB.FindOneAndUpdate(ctx, filter, update)
+		if result.Err() != nil {
+			return "", fmt.Errorf("failed to update user token document; %w", err)
+		}
+
+		return newToken.AccessToken, nil
 	}
 
-	return token.accessToken, nil
+	// return already valid access token
+	return token.AccessToken, nil
 }
 
 // refreshToken refreshes an expired token.
@@ -245,8 +351,7 @@ func (c *Client) refreshToken(refreshToken string) (*TokenResponse, error) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Authorization", "Basic "+auth)
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := c.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to request token endpoint; %w", err)
 	}
@@ -269,6 +374,9 @@ func (c *Client) refreshToken(refreshToken string) (*TokenResponse, error) {
 			tokenResp.ErrorDescription,
 		)
 	}
+	// TODO: if refresh token failed with:
+	// "token request failed - invalid_grant; the provided authorization refresh token is invalid or was issued to another client"
+	// should redirect user back to oauth consent/login
 
 	if tokenResp.AccessToken == "" {
 		return nil, errors.New("empty access token")
@@ -278,7 +386,7 @@ func (c *Client) refreshToken(refreshToken string) (*TokenResponse, error) {
 	slog.Info(
 		"refreshed access token",
 		"expires_in_hrs", (tokenResp.ExpiresIn / htos),
-		"refresh_token_expires_in_hrs", (tokenResp.RefreshTokenExpiresIn / htos))
+	)
 
 	return &tokenResp, nil
 }
