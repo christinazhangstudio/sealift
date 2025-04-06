@@ -11,8 +11,11 @@ import (
 	"os/signal"
 	"time"
 
+	"github.tesla.com/chrzhang/sealift/api"
 	"github.tesla.com/chrzhang/sealift/auth"
 	"github.tesla.com/chrzhang/sealift/ebay"
+
+	"github.com/rs/cors"
 
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -43,9 +46,13 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	// CORS - to allow bypass of CORS block for JS
+	// wrap standard serve mus with CORS handler
+	ch := cors.Default().Handler(mux)
+
 	s := &http.Server{
 		Addr:         port,
-		Handler:      mux,
+		Handler:      ch,
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 5 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -132,8 +139,11 @@ func main() {
 				"err", err,
 			)
 			http.Error(w, "failed to get registered users", http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
 			return
 		}
+
+		var userSummaries []api.UserSummary
 		for _, user := range users {
 			ctx = context.WithValue(ctx, auth.USER, user)
 			summary, err := client.GetTransactionSummary(ctx)
@@ -144,11 +154,20 @@ func main() {
 					"user", user,
 				)
 				http.Error(w, "failed to get transaction summary", http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
 				return
 			}
 
-			fmt.Fprintf(w, "%+v", summary)
+			userSummaries = append(
+				userSummaries,
+				api.UserSummary{
+					User:    user,
+					Summary: summary,
+				},
+			)
 		}
+
+		json.NewEncoder(w).Encode(userSummaries)
 	})
 
 	go func() {
