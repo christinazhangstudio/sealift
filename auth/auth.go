@@ -61,10 +61,10 @@ type Client struct {
 // but bson tags are useful if struct fields are renamed and thereby save some
 // inconsistency issues at no functional cost.
 type UserTokenDocument struct {
-	User         string `bson:"user"`
-	AccessToken  string `bson:"access_token"`
-	RefreshToken string `bson:"refresh_token"`
-	ExpiresAt    string `bson:"expires_at,omitempty"`
+	User         string    `bson:"user"`
+	AccessToken  string    `bson:"access_token"`
+	RefreshToken string    `bson:"refresh_token"`
+	ExpiresAt    time.Time `bson:"expires_at,omitempty"`
 }
 
 // GetUsers returns all the users this app has registered.
@@ -113,7 +113,7 @@ func (c *Client) AuthUser(ctx context.Context, authCode string) error {
 		return fmt.Errorf("failed to load timezone: %w", err)
 	}
 
-	expiresAt := time.Now().In(loc).Add(time.Duration(tokenResp.ExpiresIn) * time.Second).String()
+	expiresAt := time.Now().In(loc).Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 
 	filter := bson.D{{Key: "user", Value: user}}
 	update := bson.M{
@@ -291,18 +291,14 @@ func (c *Client) GetToken(ctx context.Context, user string) (string, error) {
 		return "", fmt.Errorf("failed to load timezone: %w", err)
 	}
 
-	layout := "2006-01-02 15:04:05.000000000 -0700 CDT"
-	parsedTime, err := time.ParseInLocation(layout, token.ExpiresAt, loc)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse time; %w", err)
-	}
+	expiresAt := token.ExpiresAt.In(loc)
 
 	now := time.Now().In(loc)
-	if parsedTime.Sub(now) < 5*time.Minute {
+	if expiresAt.Sub(now) < 5*time.Minute {
 		slog.Info(
 			"found expired/expiring token; refreshing",
 			"user", user,
-			"time_left_or_already_elapsed_if_neg", parsedTime.Sub(now),
+			"time_left_or_already_elapsed_if_neg", expiresAt.Sub(now),
 		)
 		newToken, err := c.refreshToken(token.RefreshToken)
 		if err != nil {
@@ -310,13 +306,14 @@ func (c *Client) GetToken(ctx context.Context, user string) (string, error) {
 		}
 
 		// update document, refresh token remains the same
-		newExpiresAt := time.Now().In(loc).Add(time.Duration(newToken.ExpiresIn) * time.Second).String()
+		newExpiresAt := time.Now().In(loc).Add(time.Duration(newToken.ExpiresIn) * time.Second)
 		filter := bson.D{{Key: "user", Value: user}}
 		update := bson.M{
 			"$set": UserTokenDocument{
-				User:        user,
-				AccessToken: newToken.AccessToken,
-				ExpiresAt:   newExpiresAt,
+				User:         user,
+				AccessToken:  newToken.AccessToken,
+				ExpiresAt:    newExpiresAt,
+				RefreshToken: token.RefreshToken,
 			},
 		}
 
