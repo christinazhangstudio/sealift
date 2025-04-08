@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"time"
 
 	"github.tesla.com/chrzhang/sealift/api"
@@ -138,7 +139,6 @@ func main() {
 				"failed to get registered users",
 				"err", err,
 			)
-			http.Error(w, "failed to get registered users", http.StatusInternalServerError)
 			json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
 			return
 		}
@@ -153,7 +153,6 @@ func main() {
 					"err", err,
 					"user", user,
 				)
-				http.Error(w, "failed to get transaction summary", http.StatusInternalServerError)
 				json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
 				return
 			}
@@ -168,6 +167,60 @@ func main() {
 		}
 
 		json.NewEncoder(w).Encode(userSummaries)
+	})
+
+	mux.HandleFunc("/api/get-payouts", func(w http.ResponseWriter, r *http.Request) {
+		defaultPageSize := 200 // maximum allowed, actual default is 20
+
+		pageSize, err := strconv.Atoi(r.URL.Query().Get("pageSize"))
+		if err != nil {
+			slog.Info(
+				"missing page size; using default value",
+				"pageSize", defaultPageSize,
+			)
+			pageSize = defaultPageSize
+		}
+
+		pageIdx, err := strconv.Atoi(r.URL.Query().Get("pageIdx"))
+		if err != nil {
+			slog.Info("missing page index; using 0")
+			pageIdx = 0
+		}
+
+		users, err := client.Auth.GetUsers(ctx)
+		if err != nil {
+			slog.Error(
+				"failed to get registered users",
+				"err", err,
+			)
+			json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
+			return
+		}
+
+		var userPayouts []api.UserPayouts
+		for _, user := range users {
+			ctx = context.WithValue(ctx, auth.USER, user)
+			payouts, err := client.GetPayouts(ctx, pageSize, pageIdx)
+			if err != nil {
+				slog.Error(
+					"failed to get payouts",
+					"err", err,
+					"user", user,
+				)
+				json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
+				return
+			}
+
+			userPayouts = append(
+				userPayouts,
+				api.UserPayouts{
+					User:    user,
+					Payouts: payouts,
+				},
+			)
+		}
+
+		json.NewEncoder(w).Encode(userPayouts)
 	})
 
 	go func() {
