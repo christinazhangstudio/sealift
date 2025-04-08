@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 )
 
 // "Important! You should not use any API response or notification,
@@ -97,7 +98,12 @@ func (c *Client) GetTransactionSummary(
 	if resp.StatusCode != http.StatusOK {
 		var errResp ErrorResponse
 		if err := json.Unmarshal(body, &errResp); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal error response: %w", err)
+			return nil, fmt.Errorf(
+				"failed to unmarshal error response with status %d: %w; body %s",
+				resp.StatusCode,
+				err,
+				string(body),
+			)
 		}
 		if len(errResp.Errors) > 0 {
 			return nil, fmt.Errorf("API failed with status %d with error %d: %s",
@@ -119,4 +125,95 @@ func (c *Client) GetTransactionSummary(
 	}
 
 	return &summary, nil
+}
+
+type PayoutsResponse struct {
+	Href    string   `json:"href"`
+	Next    string   `json:"next"`
+	Prev    string   `json:"prev"`
+	Limit   int      `json:"limit"`
+	Offset  int      `json:"offset"`
+	Payouts []Payout `json:"payouts"`
+	Total   int      `json:"total"`
+}
+
+type Payout struct {
+	PayoutID                string           `json:"payoutId"`
+	PayoutStatus            string           `json:"payoutStatus"`
+	PayoutStatusDescription string           `json:"payoutStatusDescription"`
+	Amount                  Amount           `json:"amount"`
+	PayoutDate              string           `json:"payoutDate"`
+	LastAttemptedPayoutDate string           `json:"lastAttemptedPayoutDate"`
+	TransactionCount        int              `json:"transactionCount"`
+	PayoutInstrument        PayoutInstrument `json:"payoutInstrument"`
+}
+
+type PayoutInstrument struct {
+	InstrumentType        string `json:"instrumentType"`
+	Nickname              string `json:"nickname"`
+	AccountLastFourDigits string `json:"accountLastFourDigits"`
+}
+
+func (c *Client) GetPayouts(
+	ctx context.Context,
+	pageSize int,
+	pageIdx int, // 0 indexed
+) (*PayoutsResponse, error) {
+	// https://apiz.ebay.com/sell/finances/v1/payout?limit=7&offset=7&sort=payoutDate
+	params := map[string]string{
+		"limit":  strconv.Itoa(pageSize),
+		"offset": strconv.Itoa(pageIdx * pageSize),
+		"sort":   "payoutDate",
+	}
+	req, err := c.request(
+		ctx,
+		financesAPI,
+		"payout",
+		params,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request; %w", err)
+	}
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to do request; %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp ErrorResponse
+		if err := json.Unmarshal(body, &errResp); err != nil {
+			return nil, fmt.Errorf(
+				"failed to unmarshal error response with status %d: %w; body %s",
+				resp.StatusCode,
+				err,
+				string(body),
+			)
+		}
+		if len(errResp.Errors) > 0 {
+			return nil, fmt.Errorf("API failed with status %d with error %d: %s",
+				resp.StatusCode,
+				errResp.Errors[0].ErrorID,
+				errResp.Errors[0].LongMessage,
+			)
+		}
+
+		return nil, fmt.Errorf("API failed with status %d with unknown error: %s",
+			resp.StatusCode,
+			string(body),
+		)
+	}
+
+	var payouts PayoutsResponse
+	if err := json.Unmarshal(body, &payouts); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal success response: %w", err)
+	}
+
+	return &payouts, nil
 }
