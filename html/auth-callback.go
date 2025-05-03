@@ -7,6 +7,15 @@ import (
 	"net/http"
 )
 
+// https://developer.mozilla.org/en-US/docs/Web/API/MessageEvent
+// HTML’s JavaScript executes in the browser (as such, client-side),
+// sending a postMessage to the parent window (window.opener)
+// with the "seller_authorized" message.
+// The window.opener.postMessage call is a client-side operation.
+// It communicates between two browser windows
+// (the popup/child window and its parent/opener window)
+// using the HTML5 postMessage API.
+
 func RenderAuthSuccess(w http.ResponseWriter, frontendURL string) {
 	tmpl := `
 <!DOCTYPE html>
