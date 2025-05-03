@@ -95,6 +95,11 @@ func (c *Client) GetTransactionSummary(
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
+	// return empty resp
+	if resp.StatusCode == http.StatusNoContent {
+		return &TransactionSummaryResponse{}, nil
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		var errResp ErrorResponse
 		if err := json.Unmarshal(body, &errResp); err != nil {
@@ -184,6 +189,11 @@ func (c *Client) GetPayouts(
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	// return empty resp
+	if resp.StatusCode == http.StatusNoContent {
+		return &PayoutsResponse{}, nil
 	}
 
 	if resp.StatusCode != http.StatusOK {

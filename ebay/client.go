@@ -19,10 +19,15 @@ type Client struct {
 	// but cyclic dependency (and db pkg not needed)
 	DB *mongo.Collection
 
-	// URL specifies the API endpoint.
+	// URL specifies the APIz endpoint.
 	// https://apiz.ebay.com for prod
 	// https://api.sandbox.ebay.com for sandbox
 	URL string
+
+	// TradURL specifies the legacy API endpoint that some APIs are on.
+	// https://api.ebay.com/ws/api.dll for prod
+	// https://api.sandbox.ebay.com/ws/api.dll for sandbox
+	TradURL string
 
 	// Auth contains auth-related functions.
 	// Used for loading in the respective user
