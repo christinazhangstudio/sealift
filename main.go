@@ -248,6 +248,8 @@ func main() {
 		json.NewEncoder(w).Encode(userPayouts)
 	})
 
+	// this is not very performant compared to per user (/get-listings-for-user)
+	// and works poorly for pagination.
 	mux.HandleFunc("/api/get-listings", func(w http.ResponseWriter, r *http.Request) {
 		defaultPageSize := 200 // maximum allowed by ebay, actual default is 25
 
