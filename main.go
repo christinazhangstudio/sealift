@@ -343,6 +343,8 @@ func main() {
 
 	mux.HandleFunc("/api/get-payouts-for-user", func(w http.ResponseWriter, r *http.Request) {
 		defaultPageSize := 200 // maximum allowed by ebay, actual default is 20
+		// recommended to use large page size and paginate results on client side
+		// to minimize API calls.
 
 		pageSize, err := strconv.Atoi(r.URL.Query().Get("pageSize"))
 		if err != nil {
@@ -391,6 +393,8 @@ func main() {
 
 	mux.HandleFunc("/api/get-listings-for-user", func(w http.ResponseWriter, r *http.Request) {
 		defaultPageSize := 200 // maximum allowed by ebay, actual default is 25
+		// recommended to use large page size and paginate results on client side
+		// to minimize API calls.
 
 		pageSize, err := strconv.Atoi(r.URL.Query().Get("pageSize"))
 		if err != nil {
