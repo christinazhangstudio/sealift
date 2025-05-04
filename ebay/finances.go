@@ -164,11 +164,9 @@ func (c *Client) GetPayouts(
 	pageSize int,
 	pageIdx int, // 0 indexed
 ) (*PayoutsResponse, error) {
-	// https://apiz.ebay.com/sell/finances/v1/payout?limit=7&offset=7&sort=payoutDate
 	params := map[string]string{
 		"limit":  strconv.Itoa(pageSize),
 		"offset": strconv.Itoa(pageIdx * pageSize),
-		"sort":   "payoutDate",
 	}
 	req, err := c.request(
 		ctx,

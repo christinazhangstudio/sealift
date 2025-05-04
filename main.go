@@ -192,6 +192,7 @@ func main() {
 		json.NewEncoder(w).Encode(userSummaries)
 	})
 
+	// doesn't work well with pagination (see /get-payouts-for-user)
 	mux.HandleFunc("/api/get-payouts", func(w http.ResponseWriter, r *http.Request) {
 		slog.Info("received request", "path", r.URL.Path)
 
@@ -338,6 +339,54 @@ func main() {
 		}
 
 		json.NewEncoder(w).Encode(userListings)
+	})
+
+	mux.HandleFunc("/api/get-payouts-for-user", func(w http.ResponseWriter, r *http.Request) {
+		defaultPageSize := 200 // maximum allowed by ebay, actual default is 20
+
+		pageSize, err := strconv.Atoi(r.URL.Query().Get("pageSize"))
+		if err != nil {
+			slog.Info(
+				"missing page size; using default value",
+				"pageSize", defaultPageSize,
+			)
+			pageSize = defaultPageSize
+		}
+
+		pageIdx, err := strconv.Atoi(r.URL.Query().Get("pageIdx"))
+		if err != nil {
+			slog.Info("missing page index; using 0")
+			pageIdx = 0
+		}
+
+		user := r.URL.Query().Get("user")
+
+		slog.Info(
+			"received request",
+			"path", r.URL.Path,
+			"pageSize", pageSize,
+			"pageIdx", pageIdx,
+			"user", user,
+		)
+
+		ctx = context.WithValue(ctx, auth.USER, user)
+		payouts, err := client.GetPayouts(ctx, pageSize, pageIdx)
+		if err != nil {
+			slog.Error(
+				"failed to get payouts",
+				"err", err,
+				"user", user,
+			)
+			json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
+			return
+		}
+
+		userPayouts := api.UserPayouts{
+			User:    user,
+			Payouts: payouts,
+		}
+
+		json.NewEncoder(w).Encode(userPayouts)
 	})
 
 	mux.HandleFunc("/api/get-listings-for-user", func(w http.ResponseWriter, r *http.Request) {
