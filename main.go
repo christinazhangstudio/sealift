@@ -82,7 +82,11 @@ func main() {
 	// especially because the number of connections per host is
 	// unlimited by default (transport.MaxConnsPerHost).
 	// e.g. `race: limit on 8128 simultaneously alive goroutines is exceeded, dying.`
-	httpClient := &http.Client{Timeout: time.Second * 5}
+	httpClient := &http.Client{Timeout: time.Second * 30}
+	// ^ 5 seconds can be a little low...
+	// Post \"https://api.ebay.com/ws/api.dll\":
+	// context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
+	// when querying /get-listings for 200+ items...
 
 	// client to make HTTP requests to eBay APIs.
 	client := &ebay.Client{
@@ -100,7 +104,7 @@ func main() {
 		},
 	}
 
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		slog.Info("received request at /", "path", r.URL.Path)
 		http.Error(w, "Not Found", http.StatusNotFound)
 	})
@@ -110,13 +114,18 @@ func main() {
 	// user auth and consent page
 	// auth-accepted URL is auth-callback
 	// https://developer.ebay.com/api-docs/static/oauth-consent-request.html
-	mux.HandleFunc("/api/register-seller", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/register-seller", func(w http.ResponseWriter, r *http.Request) {
 		slog.Info("redirecting to oauth consent page")
 		http.Redirect(w, r, ebaySignIn, http.StatusTemporaryRedirect)
 	})
 
 	// on-behalf flow for user token
-	mux.HandleFunc("/api/auth-callback", func(w http.ResponseWriter, r *http.Request) {
+	// could be a JS route (after all,
+	// Next.JS can do server-side rendering
+	// and API routes which can perform server-side code
+	// and access data in the database);
+	// this interfaces with mongo.
+	mux.HandleFunc("GET /api/auth-callback", func(w http.ResponseWriter, r *http.Request) {
 		authCode := r.URL.Query().Get("code")
 		if authCode == "" {
 			slog.Error("missing auth code")
@@ -137,7 +146,7 @@ func main() {
 		html.RenderAuthSuccess(w, frontendURL)
 	})
 
-	mux.HandleFunc("/api/get-users", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/users", func(w http.ResponseWriter, r *http.Request) {
 		slog.Info("received request", "path", r.URL.Path)
 
 		users, err := client.Auth.GetUsers(ctx)
@@ -153,7 +162,8 @@ func main() {
 		json.NewEncoder(w).Encode(api.Users{Users: users})
 	})
 
-	mux.HandleFunc("/api/get-transaction-summary", func(w http.ResponseWriter, r *http.Request) {
+	// gets transaction summaries for all users.
+	mux.HandleFunc("GET /api/transactions-summaries", func(w http.ResponseWriter, r *http.Request) {
 		slog.Info("received request", "path", r.URL.Path)
 
 		users, err := client.Auth.GetUsers(ctx)
@@ -192,156 +202,8 @@ func main() {
 		json.NewEncoder(w).Encode(userSummaries)
 	})
 
-	// doesn't work well with pagination (see /get-payouts-for-user)
-	mux.HandleFunc("/api/get-payouts", func(w http.ResponseWriter, r *http.Request) {
-		slog.Info("received request", "path", r.URL.Path)
-
-		defaultPageSize := 200 // maximum allowed by ebay, actual default is 20
-
-		pageSize, err := strconv.Atoi(r.URL.Query().Get("pageSize"))
-		if err != nil {
-			slog.Info(
-				"missing page size; using default value",
-				"pageSize", defaultPageSize,
-			)
-			pageSize = defaultPageSize
-		}
-
-		pageIdx, err := strconv.Atoi(r.URL.Query().Get("pageIdx"))
-		if err != nil {
-			slog.Info("missing page index; using 0")
-			pageIdx = 0
-		}
-
-		users, err := client.Auth.GetUsers(ctx)
-		if err != nil {
-			slog.Error(
-				"failed to get registered users",
-				"err", err,
-			)
-			json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
-			return
-		}
-
-		var userPayouts []api.UserPayouts
-		for _, user := range users {
-			ctx = context.WithValue(ctx, auth.USER, user)
-			payouts, err := client.GetPayouts(ctx, pageSize, pageIdx)
-			if err != nil {
-				slog.Error(
-					"failed to get payouts",
-					"err", err,
-					"user", user,
-				)
-				json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
-				return
-			}
-
-			userPayouts = append(
-				userPayouts,
-				api.UserPayouts{
-					User:    user,
-					Payouts: payouts,
-				},
-			)
-		}
-
-		json.NewEncoder(w).Encode(userPayouts)
-	})
-
-	// this is not very performant compared to per user (/get-listings-for-user)
-	// and works poorly for pagination.
-	mux.HandleFunc("/api/get-listings", func(w http.ResponseWriter, r *http.Request) {
-		defaultPageSize := 200 // maximum allowed by ebay, actual default is 25
-
-		pageSize, err := strconv.Atoi(r.URL.Query().Get("pageSize"))
-		if err != nil {
-			slog.Info(
-				"missing page size; using default value",
-				"pageSize", defaultPageSize,
-			)
-			pageSize = defaultPageSize
-		}
-
-		pageIdx, err := strconv.Atoi(r.URL.Query().Get("pageIdx"))
-		if err != nil {
-			slog.Info("missing page index; using 0")
-			pageIdx = 0
-		}
-
-		layout := "2006-01-02" // YYYY-MM-DD
-		startFrom, err := time.Parse(layout, r.URL.Query().Get("startFrom"))
-		if err != nil {
-			json.NewEncoder(w).Encode(api.Error{Message: "invalid startFrom format. Use YYYY-MM-DD."})
-			return
-		}
-
-		startTo, err := time.Parse(layout, r.URL.Query().Get("startTo"))
-		if err != nil {
-			json.NewEncoder(w).Encode(api.Error{Message: "invalid startTo format. Use YYYY-MM-DD."})
-			return
-		}
-
-		if startTo.Before(startFrom) {
-			json.NewEncoder(w).Encode(api.Error{Message: "startTo must be greater than startFrom."})
-			return
-		}
-
-		daysDiff := startTo.Sub(startFrom).Hours() / 24
-		if daysDiff > 120 {
-			json.NewEncoder(w).Encode(api.Error{Message: "range cannot exceed 120 days."})
-			return
-		}
-
-		slog.Info(
-			"received request",
-			"path", r.URL.Path,
-			"pageSize", pageSize,
-			"pageIdx", pageIdx,
-			"startFrom", startFrom,
-			"startTo", startTo,
-		)
-
-		users, err := client.Auth.GetUsers(ctx)
-		if err != nil {
-			slog.Error(
-				"failed to get registered users",
-				"err", err,
-			)
-			json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
-			return
-		}
-
-		var userListings []api.UserListings
-		for _, user := range users {
-			ctx = context.WithValue(ctx, auth.USER, user)
-			listings, err := client.GetSellerList(ctx, pageSize, pageIdx, startFrom, startTo)
-			// if the error was that no items were found for the seller
-			// for the specified range/page index, that's fine
-			// use an empty Listings array for the response.
-			if err != nil && err != ebay.ErrHasNoMoreItems {
-				slog.Error(
-					"failed to get listings",
-					"err", err,
-					"user", user,
-				)
-				json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
-				return
-			}
-
-			userListings = append(
-				userListings,
-				api.UserListings{
-					User:     user,
-					Listings: listings,
-				},
-			)
-		}
-
-		json.NewEncoder(w).Encode(userListings)
-	})
-
-	mux.HandleFunc("/api/get-payouts-for-user", func(w http.ResponseWriter, r *http.Request) {
+	// getting payouts for *all* users doesn't work well with pagination
+	mux.HandleFunc("GET /api/payouts/{user}", func(w http.ResponseWriter, r *http.Request) {
 		defaultPageSize := 200 // maximum allowed by ebay, actual default is 20
 		// recommended to use large page size and paginate results on client side
 		// to minimize API calls.
@@ -361,7 +223,11 @@ func main() {
 			pageIdx = 0
 		}
 
-		user := r.URL.Query().Get("user")
+		user := r.PathValue("user")
+		if user == "" {
+			json.NewEncoder(w).Encode(api.Error{Message: "user not specified."})
+			return
+		}
 
 		slog.Info(
 			"received request",
@@ -391,7 +257,7 @@ func main() {
 		json.NewEncoder(w).Encode(userPayouts)
 	})
 
-	mux.HandleFunc("/api/get-listings-for-user", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/listings{user}", func(w http.ResponseWriter, r *http.Request) {
 		defaultPageSize := 200 // maximum allowed by ebay, actual default is 25
 		// recommended to use large page size and paginate results on client side
 		// to minimize API calls.
@@ -435,7 +301,11 @@ func main() {
 			return
 		}
 
-		user := r.URL.Query().Get("user")
+		user := r.PathValue("user")
+		if user == "" {
+			json.NewEncoder(w).Encode(api.Error{Message: "user not specified."})
+			return
+		}
 
 		slog.Info(
 			"received request",
