@@ -19,6 +19,7 @@ import (
 
 	"github.com/rs/cors"
 
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -36,6 +37,7 @@ var (
 	mongoURI            = os.Getenv("MONGO_URI")
 	frontendURL         = os.Getenv("FRONTEND_URL")
 	port                = os.Getenv("PORT")
+	jwtSecret           = os.Getenv("JWT_SECRET")
 )
 
 // ChallengeResponse for the verification response.
@@ -86,7 +88,7 @@ func main() {
 	// ^ 5 seconds can be a little low...
 	// Post \"https://api.ebay.com/ws/api.dll\":
 	// context deadline exceeded (Client.Timeout exceeded while awaiting headers)"
-	// when querying /get-listings for 200+ items...
+	// when querying /listings for 200+ items...
 
 	// client to make HTTP requests to eBay APIs.
 	client := &ebay.Client{
@@ -104,12 +106,57 @@ func main() {
 		},
 	}
 
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		slog.Info("received request at /", "path", r.URL.Path)
 		http.Error(w, "Not Found", http.StatusNotFound)
 	})
 
 	mux.HandleFunc("/sealift-webhook", notificationHandler)
+
+	// JWT-based login with CSRF middleware
+	mux.HandleFunc("GET /api/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		slog.Info("received request to login", "part", r.URL.Path)
+
+		// this is ok with https
+		var creds struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+		err := json.NewDecoder(r.Body).Decode(&creds)
+		if err != nil {
+			slog.Error(
+				"failed to auth user; invalid creds",
+				"err", err,
+			)
+			http.Error(w, "failed to auth user; invalid creds", http.StatusBadRequest)
+			return
+		}
+
+		if creds.Username == "" || creds.Password == "" {
+			http.Error(w, "username and password not supplied", http.StatusBadRequest)
+			return
+		}
+
+		mongoCollection := mongoDB.Collection("")
+
+		filter := bson.D{{Key: "user", Value: creds.Username}}
+		var token UserTokenDocument
+		err = .FindOne(ctx, filter).Decode(&token)
+		if err == mongo.ErrNoDocuments {
+			http.Error(w, "invalid user credentials", http.StatusUnauthorized)
+			return
+		}
+
+		if err != nil {
+			http.Error("failed to find token for user; %w", err)
+		}
+
+		// JWTs are signed with a secret key; storing
+		// it in FE (client-side code/env vars/etc)
+		// exposes it to attackers via XSS and browser dev tools
+		// (via localStorage and non-HTTP-only cookies).
+
+	})
 
 	// user auth and consent page
 	// auth-accepted URL is auth-callback
@@ -155,7 +202,7 @@ func main() {
 				"failed to get registered users",
 				"err", err,
 			)
-			json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
@@ -163,7 +210,7 @@ func main() {
 	})
 
 	// gets transaction summaries for all users.
-	mux.HandleFunc("GET /api/transactions-summaries", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/transaction-summaries", func(w http.ResponseWriter, r *http.Request) {
 		slog.Info("received request", "path", r.URL.Path)
 
 		users, err := client.Auth.GetUsers(ctx)
@@ -172,7 +219,7 @@ func main() {
 				"failed to get registered users",
 				"err", err,
 			)
-			json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
@@ -186,7 +233,7 @@ func main() {
 					"err", err,
 					"user", user,
 				)
-				json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
+				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 
@@ -225,7 +272,7 @@ func main() {
 
 		user := r.PathValue("user")
 		if user == "" {
-			json.NewEncoder(w).Encode(api.Error{Message: "user not specified."})
+			http.Error(w, "user not specified.", http.StatusBadRequest)
 			return
 		}
 
@@ -245,7 +292,7 @@ func main() {
 				"err", err,
 				"user", user,
 			)
-			json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
@@ -280,30 +327,30 @@ func main() {
 		layout := "2006-01-02" // YYYY-MM-DD
 		startFrom, err := time.Parse(layout, r.URL.Query().Get("startFrom"))
 		if err != nil {
-			json.NewEncoder(w).Encode(api.Error{Message: "invalid startFrom format. Use YYYY-MM-DD."})
+			http.Error(w, "invalid startFrom format. Use YYYY-MM-DD.", http.StatusBadRequest)
 			return
 		}
 
 		startTo, err := time.Parse(layout, r.URL.Query().Get("startTo"))
 		if err != nil {
-			json.NewEncoder(w).Encode(api.Error{Message: "invalid startTo format. Use YYYY-MM-DD."})
+			http.Error(w, "invalid startTo format. Use YYYY-MM-DD.", http.StatusBadRequest)
 			return
 		}
 
 		if startTo.Before(startFrom) {
-			json.NewEncoder(w).Encode(api.Error{Message: "startTo must be greater than startFrom."})
+			http.Error(w, "startTo must be greater than startFrom.", http.StatusBadRequest)
 			return
 		}
 
 		daysDiff := startTo.Sub(startFrom).Hours() / 24
 		if daysDiff > 120 {
-			json.NewEncoder(w).Encode(api.Error{Message: "range cannot exceed 120 days."})
+			http.Error(w, "range cannot exceed 120 days.", http.StatusBadRequest)
 			return
 		}
 
 		user := r.PathValue("user")
 		if user == "" {
-			json.NewEncoder(w).Encode(api.Error{Message: "user not specified."})
+			http.Error(w, "user not specified.", http.StatusBadRequest)
 			return
 		}
 
@@ -328,7 +375,7 @@ func main() {
 				"err", err,
 				"user", user,
 			)
-			json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
