@@ -19,7 +19,6 @@ import (
 
 	"github.com/rs/cors"
 
-	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -113,66 +112,61 @@ func main() {
 
 	mux.HandleFunc("/sealift-webhook", notificationHandler)
 
-	// JWT-based login with CSRF middleware
-	mux.HandleFunc("GET /api/auth/login", func(w http.ResponseWriter, r *http.Request) {
-		slog.Info("received request to login", "part", r.URL.Path)
+	// // JWT-based login with CSRF middleware
+	// mux.HandleFunc("GET /api/auth/login", func(w http.ResponseWriter, r *http.Request) {
+	// 	slog.Info("received request to login", "part", r.URL.Path)
 
-		// this is ok with https
-		var creds struct {
-			Username string `json:"username"`
-			Password string `json:"password"`
-		}
-		err := json.NewDecoder(r.Body).Decode(&creds)
-		if err != nil {
-			slog.Error(
-				"failed to auth user; invalid creds",
-				"err", err,
-			)
-			http.Error(w, "failed to auth user; invalid creds", http.StatusBadRequest)
-			return
-		}
+	// 	// this is ok with https
+	// 	var creds struct {
+	// 		Username string `json:"username"`
+	// 		Password string `json:"password"`
+	// 	}
+	// 	err := json.NewDecoder(r.Body).Decode(&creds)
+	// 	if err != nil {
+	// 		slog.Error(
+	// 			"failed to auth user; invalid creds",
+	// 			"err", err,
+	// 		)
+	// 		http.Error(w, "failed to auth user; invalid creds", http.StatusBadRequest)
+	// 		return
+	// 	}
 
-		if creds.Username == "" || creds.Password == "" {
-			http.Error(w, "username and password not supplied", http.StatusBadRequest)
-			return
-		}
+	// 	if creds.Username == "" || creds.Password == "" {
+	// 		http.Error(w, "username and password not supplied", http.StatusBadRequest)
+	// 		return
+	// 	}
 
-		mongoCollection := mongoDB.Collection("")
+	// 	mongoCollection := mongoDB.Collection("")
 
-		filter := bson.D{{Key: "user", Value: creds.Username}}
-		var token UserTokenDocument
-		err = .FindOne(ctx, filter).Decode(&token)
-		if err == mongo.ErrNoDocuments {
-			http.Error(w, "invalid user credentials", http.StatusUnauthorized)
-			return
-		}
+	// 	filter := bson.D{{Key: "user", Value: creds.Username}}
+	// 	var token UserTokenDocument
+	// 	err = .FindOne(ctx, filter).Decode(&token)
+	// 	if err == mongo.ErrNoDocuments {
+	// 		http.Error(w, "invalid user credentials", http.StatusUnauthorized)
+	// 		return
+	// 	}
 
-		if err != nil {
-			http.Error("failed to find token for user; %w", err)
-		}
+	// 	if err != nil {
+	// 		http.Error("failed to find token for user; %w", err)
+	// 	}
 
-		// JWTs are signed with a secret key; storing
-		// it in FE (client-side code/env vars/etc)
-		// exposes it to attackers via XSS and browser dev tools
-		// (via localStorage and non-HTTP-only cookies).
+	// 	// JWTs are signed with a secret key; storing
+	// 	// it in FE (client-side code/env vars/etc)
+	// 	// exposes it to attackers via XSS and browser dev tools
+	// 	// (via localStorage and non-HTTP-only cookies).
 
-	})
+	// })
 
 	// user auth and consent page
 	// auth-accepted URL is auth-callback
 	// https://developer.ebay.com/api-docs/static/oauth-consent-request.html
-	mux.HandleFunc("GET /api/register-seller", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/register-seller", func(w http.ResponseWriter, r *http.Request) {
 		slog.Info("redirecting to oauth consent page")
 		http.Redirect(w, r, ebaySignIn, http.StatusTemporaryRedirect)
 	})
 
 	// on-behalf flow for user token
-	// could be a JS route (after all,
-	// Next.JS can do server-side rendering
-	// and API routes which can perform server-side code
-	// and access data in the database);
-	// this interfaces with mongo.
-	mux.HandleFunc("GET /api/auth-callback", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/auth-callback", func(w http.ResponseWriter, r *http.Request) {
 		authCode := r.URL.Query().Get("code")
 		if authCode == "" {
 			slog.Error("missing auth code")
@@ -193,7 +187,7 @@ func main() {
 		html.RenderAuthSuccess(w, frontendURL)
 	})
 
-	mux.HandleFunc("GET /api/users", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/get-users", func(w http.ResponseWriter, r *http.Request) {
 		slog.Info("received request", "path", r.URL.Path)
 
 		users, err := client.Auth.GetUsers(ctx)
@@ -249,8 +243,156 @@ func main() {
 		json.NewEncoder(w).Encode(userSummaries)
 	})
 
-	// getting payouts for *all* users doesn't work well with pagination
-	mux.HandleFunc("GET /api/payouts/{user}", func(w http.ResponseWriter, r *http.Request) {
+	// doesn't work well with pagination (see /get-payouts-for-user)
+	mux.HandleFunc("/api/get-payouts", func(w http.ResponseWriter, r *http.Request) {
+		slog.Info("received request", "path", r.URL.Path)
+
+		defaultPageSize := 200 // maximum allowed by ebay, actual default is 20
+
+		pageSize, err := strconv.Atoi(r.URL.Query().Get("pageSize"))
+		if err != nil {
+			slog.Info(
+				"missing page size; using default value",
+				"pageSize", defaultPageSize,
+			)
+			pageSize = defaultPageSize
+		}
+
+		pageIdx, err := strconv.Atoi(r.URL.Query().Get("pageIdx"))
+		if err != nil {
+			slog.Info("missing page index; using 0")
+			pageIdx = 0
+		}
+
+		users, err := client.Auth.GetUsers(ctx)
+		if err != nil {
+			slog.Error(
+				"failed to get registered users",
+				"err", err,
+			)
+			json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
+			return
+		}
+
+		var userPayouts []api.UserPayouts
+		for _, user := range users {
+			ctx = context.WithValue(ctx, auth.USER, user)
+			payouts, err := client.GetPayouts(ctx, pageSize, pageIdx)
+			if err != nil {
+				slog.Error(
+					"failed to get payouts",
+					"err", err,
+					"user", user,
+				)
+				json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
+				return
+			}
+
+			userPayouts = append(
+				userPayouts,
+				api.UserPayouts{
+					User:    user,
+					Payouts: payouts,
+				},
+			)
+		}
+
+		json.NewEncoder(w).Encode(userPayouts)
+	})
+
+	// this is not very performant compared to per user (/get-listings-for-user)
+	// and works poorly for pagination.
+	mux.HandleFunc("/api/get-listings", func(w http.ResponseWriter, r *http.Request) {
+		defaultPageSize := 200 // maximum allowed by ebay, actual default is 25
+
+		pageSize, err := strconv.Atoi(r.URL.Query().Get("pageSize"))
+		if err != nil {
+			slog.Info(
+				"missing page size; using default value",
+				"pageSize", defaultPageSize,
+			)
+			pageSize = defaultPageSize
+		}
+
+		pageIdx, err := strconv.Atoi(r.URL.Query().Get("pageIdx"))
+		if err != nil {
+			slog.Info("missing page index; using 0")
+			pageIdx = 0
+		}
+
+		layout := "2006-01-02" // YYYY-MM-DD
+		startFrom, err := time.Parse(layout, r.URL.Query().Get("startFrom"))
+		if err != nil {
+			json.NewEncoder(w).Encode(api.Error{Message: "invalid startFrom format. Use YYYY-MM-DD."})
+			return
+		}
+
+		startTo, err := time.Parse(layout, r.URL.Query().Get("startTo"))
+		if err != nil {
+			json.NewEncoder(w).Encode(api.Error{Message: "invalid startTo format. Use YYYY-MM-DD."})
+			return
+		}
+
+		if startTo.Before(startFrom) {
+			json.NewEncoder(w).Encode(api.Error{Message: "startTo must be greater than startFrom."})
+			return
+		}
+
+		daysDiff := startTo.Sub(startFrom).Hours() / 24
+		if daysDiff > 120 {
+			json.NewEncoder(w).Encode(api.Error{Message: "range cannot exceed 120 days."})
+			return
+		}
+
+		slog.Info(
+			"received request",
+			"path", r.URL.Path,
+			"pageSize", pageSize,
+			"pageIdx", pageIdx,
+			"startFrom", startFrom,
+			"startTo", startTo,
+		)
+
+		users, err := client.Auth.GetUsers(ctx)
+		if err != nil {
+			slog.Error(
+				"failed to get registered users",
+				"err", err,
+			)
+			json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
+			return
+		}
+
+		var userListings []api.UserListings
+		for _, user := range users {
+			ctx = context.WithValue(ctx, auth.USER, user)
+			listings, err := client.GetSellerList(ctx, pageSize, pageIdx, startFrom, startTo)
+			// if the error was that no items were found for the seller
+			// for the specified range/page index, that's fine
+			// use an empty Listings array for the response.
+			if err != nil && err != ebay.ErrHasNoMoreItems {
+				slog.Error(
+					"failed to get listings",
+					"err", err,
+					"user", user,
+				)
+				json.NewEncoder(w).Encode(api.Error{Message: err.Error()})
+				return
+			}
+
+			userListings = append(
+				userListings,
+				api.UserListings{
+					User:     user,
+					Listings: listings,
+				},
+			)
+		}
+
+		json.NewEncoder(w).Encode(userListings)
+	})
+
+	mux.HandleFunc("/api/get-payouts-for-user", func(w http.ResponseWriter, r *http.Request) {
 		defaultPageSize := 200 // maximum allowed by ebay, actual default is 20
 		// recommended to use large page size and paginate results on client side
 		// to minimize API calls.
