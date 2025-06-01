@@ -187,7 +187,7 @@ func main() {
 		html.RenderAuthSuccess(w, frontendURL)
 	})
 
-	mux.HandleFunc("/api/get-users", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/users", func(w http.ResponseWriter, r *http.Request) {
 		slog.Info("received request", "path", r.URL.Path)
 
 		users, err := client.Auth.GetUsers(ctx)
@@ -243,8 +243,8 @@ func main() {
 		json.NewEncoder(w).Encode(userSummaries)
 	})
 
-	// doesn't work well with pagination (see /get-payouts-for-user)
-	mux.HandleFunc("/api/get-payouts", func(w http.ResponseWriter, r *http.Request) {
+	// doesn't work well with pagination (see user specific method)
+	mux.HandleFunc("GET /api/all-payouts", func(w http.ResponseWriter, r *http.Request) {
 		slog.Info("received request", "path", r.URL.Path)
 
 		defaultPageSize := 200 // maximum allowed by ebay, actual default is 20
@@ -300,9 +300,9 @@ func main() {
 		json.NewEncoder(w).Encode(userPayouts)
 	})
 
-	// this is not very performant compared to per user (/get-listings-for-user)
+	// this is not very performant compared to per user
 	// and works poorly for pagination.
-	mux.HandleFunc("/api/get-listings", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/all-listings", func(w http.ResponseWriter, r *http.Request) {
 		defaultPageSize := 200 // maximum allowed by ebay, actual default is 25
 
 		pageSize, err := strconv.Atoi(r.URL.Query().Get("pageSize"))
@@ -392,7 +392,7 @@ func main() {
 		json.NewEncoder(w).Encode(userListings)
 	})
 
-	mux.HandleFunc("/api/get-payouts-for-user", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/payouts/{user}", func(w http.ResponseWriter, r *http.Request) {
 		defaultPageSize := 200 // maximum allowed by ebay, actual default is 20
 		// recommended to use large page size and paginate results on client side
 		// to minimize API calls.
