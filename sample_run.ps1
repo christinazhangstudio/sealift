@@ -2,6 +2,7 @@ $containerName = "sealift"
 if (docker container inspect $containerName 2>$null) {
     Write-Host "container $containerName exists; removing it"
     docker rm -f $containerName
+    docker image prune -f
 }
 
 docker run -d `
