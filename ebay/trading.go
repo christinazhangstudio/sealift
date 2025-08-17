@@ -22,7 +22,7 @@ var ErrHasNoMoreItems = errors.New("seller has no more items to display")
 
 type SellerListRequest struct {
 	XMLName              xml.Name `xml:"GetSellerListRequest"`
-	Xmlns                string   `xml:"xmlns,attr"`
+	XMLNS                string   `xml:"xmlns,attr"`
 	RequesterCredentials struct {
 		EBayAuthToken string `xml:"eBayAuthToken"`
 	} `xml:"RequesterCredentials"`
@@ -198,7 +198,7 @@ func (c *Client) GetSellerList(
 	}
 
 	request := SellerListRequest{
-		Xmlns:            "urn:ebay:apis:eBLBaseComponents",
+		XMLNS:            "urn:ebay:apis:eBLBaseComponents",
 		ErrorLanguage:    "en_US",
 		WarningLevel:     "High",
 		GranularityLevel: "Coarse",
