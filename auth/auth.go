@@ -72,8 +72,11 @@ type UserTokenDocument struct {
 
 // GetUsers returns all the users this app has registered.
 func (c *Client) GetUsers(ctx context.Context) ([]string, error) {
+	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
 	var users []string
-	undec, err := c.DB.Distinct(ctx, "user", bson.D{})
+	undec, err := c.DB.Distinct(dbCtx, "user", bson.D{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to get users; %w", err)
 	}
@@ -128,9 +131,12 @@ func (c *Client) AuthUser(ctx context.Context, authCode string) error {
 		},
 	}
 
+	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
 	// upsert allows insert if not exist
 	opts := options.Update().SetUpsert(true)
-	result, err := c.DB.UpdateOne(ctx, filter, update, opts)
+	result, err := c.DB.UpdateOne(dbCtx, filter, update, opts)
 	if err != nil {
 		return fmt.Errorf("failed to insert user; %w", err)
 	}
@@ -282,9 +288,12 @@ func (c *Client) getUser(accessToken string) (string, error) {
 // }
 
 func (c *Client) GetToken(ctx context.Context, user string) (string, error) {
+	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
 	filter := bson.D{{Key: "user", Value: user}}
 	var token UserTokenDocument
-	err := c.DB.FindOne(ctx, filter).Decode(&token)
+	err := c.DB.FindOne(dbCtx, filter).Decode(&token)
 	if err != nil {
 		return "", fmt.Errorf("failed to find token for user; %w", err)
 	}
@@ -320,7 +329,7 @@ func (c *Client) GetToken(ctx context.Context, user string) (string, error) {
 			},
 		}
 
-		result := c.DB.FindOneAndUpdate(ctx, filter, update)
+		result := c.DB.FindOneAndUpdate(dbCtx, filter, update)
 		if result.Err() != nil {
 			return "", fmt.Errorf("failed to update user token document; %w", err)
 		}
