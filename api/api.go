@@ -25,3 +25,8 @@ type UserListings struct {
 	User     string                   `json:"user"`
 	Listings *ebay.SellerListResponse `json:"listings"`
 }
+
+type UserAccount struct {
+	User    string                `json:"user"`
+	Account *ebay.AccountResponse `json:"account"`
+}

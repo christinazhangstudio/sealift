@@ -54,6 +54,9 @@ type Client struct {
 
 	// ClientSecret is the eBay application secret.
 	ClientSecret string
+
+	// DevID used for specific APIs, such as GetAccount.
+	DevID string
 }
 
 // UserDocument represents a document associating user with their OAuth token.

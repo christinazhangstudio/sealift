@@ -19,6 +19,7 @@ import (
 
 	"github.com/rs/cors"
 
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -28,6 +29,7 @@ var (
 	endpointURL         = os.Getenv("ENDPOINT_URL") // for notifications
 	clientID            = os.Getenv("EBAY_CLIENT_ID")
 	clientSecret        = os.Getenv("EBAY_CLIENT_SECRET")
+	ebayDevID           = os.Getenv("EBAY_DEV_ID") // only for account info
 	ebayURL             = os.Getenv("EBAY_URL")
 	ebayTradURL         = os.Getenv("EBAY_TRAD_DLL_URL")
 	ebayAuthURL         = os.Getenv("EBAY_AUTH_URL")
@@ -53,7 +55,13 @@ func main() {
 
 	// CORS - to allow bypass of CORS block for JS
 	// wrap standard serve mus with CORS handler
-	ch := cors.Default().Handler(mux)
+	//ch := cors.Default().Handler(mux) supports only simple verbs
+	ch := cors.New(cors.Options{
+		AllowedOrigins:   []string{"*"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE"},
+		AllowedHeaders:   []string{"*"},
+		AllowCredentials: false,
+	}).Handler(mux)
 
 	s := &http.Server{
 		Addr:         port,
@@ -102,6 +110,7 @@ func main() {
 			RedirectURI:  ebayAuthRedirectURI,
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
+			DevID:        ebayDevID,
 		},
 	}
 
@@ -217,7 +226,39 @@ func main() {
 			"user", user,
 		)
 
-		// TODO: delete user
+		filter := bson.D{{Key: "user", Value: user}}
+		err := client.DB.FindOne(ctx, filter).Err()
+		if err == mongo.ErrNoDocuments {
+			slog.Error(
+				"user not found",
+				"err", err,
+			)
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			slog.Error(
+				"failed to find user",
+				"err", err,
+			)
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+
+		result, err := client.DB.DeleteOne(ctx, filter)
+		if err != nil {
+			slog.Error(
+				"failed to delete user",
+				"err", err,
+			)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if result.DeletedCount == 0 {
+			slog.Error("no user was deleted")
+			http.Error(w, "no user was deleted", http.StatusNotFound)
+			return
+		}
 
 		slog.Info("deleted user", "user", user)
 		w.WriteHeader(http.StatusOK)
@@ -335,7 +376,7 @@ func main() {
 		pageIdx, err := strconv.Atoi(r.URL.Query().Get("pageIdx"))
 		if err != nil {
 			slog.Info("missing page index; using 0")
-			pageIdx = 0
+			pageIdx = 1
 		}
 
 		layout := "2006-01-02" // YYYY-MM-DD
@@ -396,6 +437,66 @@ func main() {
 		userListing := api.UserListings{
 			User:     user,
 			Listings: listings,
+		}
+
+		json.NewEncoder(w).Encode(userListing)
+	})
+
+	mux.HandleFunc("GET /api/account/{user}", func(w http.ResponseWriter, r *http.Request) {
+		defaultPageSize := 200 // maximum allowed by ebay, actual default is 25
+		// recommended to use large page size and paginate results on client side
+		// to minimize API calls.
+
+		pageSize, err := strconv.Atoi(r.URL.Query().Get("pageSize"))
+		if err != nil {
+			slog.Info(
+				"missing page size; using default value",
+				"pageSize", defaultPageSize,
+			)
+			pageSize = defaultPageSize
+		}
+
+		pageIdx, err := strconv.Atoi(r.URL.Query().Get("pageIdx"))
+		if err != nil {
+			slog.Info("missing page index; using 1")
+			pageIdx = 1
+		}
+
+		user := r.PathValue("user")
+		if user == "" {
+			http.Error(w, "user not specified.", http.StatusBadRequest)
+			return
+		}
+
+		slog.Info(
+			"received request",
+			"path", r.URL.Path,
+			"pageSize", pageSize,
+			"pageIdx", pageIdx,
+			"user", user,
+		)
+
+		ctx = context.WithValue(ctx, auth.USER, user)
+		account, err := client.GetAccount(ctx, pageSize, pageIdx)
+		if err != nil {
+			slog.Error(
+				"failed to get account",
+				"err", err,
+				"user", user,
+			)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		slog.Info(
+			"successfully got user account info",
+			"user", user,
+			"account", account.AccountID,
+		)
+
+		userListing := api.UserAccount{
+			User:    user,
+			Account: account,
 		}
 
 		json.NewEncoder(w).Encode(userListing)
