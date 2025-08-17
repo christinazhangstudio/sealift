@@ -20,8 +20,6 @@ import (
 // (2) BetweenSpecifiedDates (returns entries posted between specific dates),
 // or (3) OrderId (returns entries related to a specific order)."
 
-// TODO: https://developer.ebay.com/api-docs/buy/order_v1/types/gct:CreditCard ?
-
 type AccountRequest struct {
 	XMLName                 xml.Name `xml:"GetAccountRequest"`
 	XMLNS                   string   `xml:"xmlns,attr"`
@@ -174,6 +172,8 @@ func (c *Client) GetAccount(
 		WarningLevel:            "High",
 		AccountEntrySortType:    "AccountEntryFeeTypeAscending",
 		AccountHistorySelection: "LastInvoice",
+		ExcludeBalance:          false,
+		ExcludeSummary:          false,
 	}
 	request.RequesterCredentials.EBayAuthToken = token
 	request.Pagination.EntriesPerPage = pageSize
