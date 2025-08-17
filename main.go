@@ -16,6 +16,7 @@ import (
 	"github.tesla.com/chrzhang/sealift/auth"
 	"github.tesla.com/chrzhang/sealift/ebay"
 	"github.tesla.com/chrzhang/sealift/html"
+	"github.tesla.com/chrzhang/sealift/notes"
 
 	"github.com/rs/cors"
 
@@ -83,7 +84,7 @@ func main() {
 	}()
 
 	mongoDB := db.Database("sealift")
-	mongoCollection := mongoDB.Collection("users")
+	mongoUsersCollection := mongoDB.Collection("users")
 
 	// reused for now
 	// keep in mind will only reuse connections when the resp body has been fully read and closed!
@@ -100,12 +101,12 @@ func main() {
 	// client to make HTTP requests to eBay APIs.
 	client := &ebay.Client{
 		Client:  httpClient,
-		DB:      mongoCollection,
+		DB:      mongoUsersCollection,
 		URL:     ebayURL,
 		TradURL: ebayTradURL,
 		Auth: &auth.Client{
 			Client:       httpClient,
-			DB:           mongoCollection,
+			DB:           mongoUsersCollection,
 			AuthURL:      ebayAuthURL,
 			RedirectURI:  ebayAuthRedirectURI,
 			ClientID:     clientID,
@@ -226,8 +227,11 @@ func main() {
 			"user", user,
 		)
 
+		dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+
 		filter := bson.D{{Key: "user", Value: user}}
-		err := client.DB.FindOne(ctx, filter).Err()
+		err := client.DB.FindOne(dbCtx, filter).Err()
 		if err == mongo.ErrNoDocuments {
 			slog.Error(
 				"user not found",
@@ -245,7 +249,7 @@ func main() {
 			return
 		}
 
-		result, err := client.DB.DeleteOne(ctx, filter)
+		result, err := client.DB.DeleteOne(dbCtx, filter)
 		if err != nil {
 			slog.Error(
 				"failed to delete user",
@@ -500,6 +504,112 @@ func main() {
 		}
 
 		json.NewEncoder(w).Encode(userListing)
+	})
+
+	mux.HandleFunc("GET /api/notes", func(w http.ResponseWriter, r *http.Request) {
+		notesDB := mongoDB.Collection("notes")
+		notes, err := notes.GetNotes(ctx, notesDB)
+		if err != nil {
+			slog.Error(
+				"failed to get notes",
+				"err", err,
+			)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(notes)
+	})
+
+	mux.HandleFunc("POST /api/notes", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Content string `json:"content"`
+			Color   string `json:"color"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			slog.Error(
+				"invalid json",
+				"err", err,
+			)
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+
+		notesDB := mongoDB.Collection("notes")
+		err := notes.CreateNote(ctx, notesDB, req.Content, req.Color)
+		if err != nil {
+			slog.Error(
+				"failed to create note",
+				"err", err,
+			)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "OK")
+	})
+
+	mux.HandleFunc("PUT /api/notes/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if id == "" {
+			slog.Error("id not specified")
+			http.Error(w, "id not specified.", http.StatusBadRequest)
+			return
+		}
+
+		var req struct {
+			Content string `json:"content"`
+			Color   string `json:"color"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			slog.Error(
+				"invalid json",
+				"err", err,
+			)
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+
+		notesDB := mongoDB.Collection("notes")
+		err := notes.UpdateNote(ctx, notesDB, id, req.Content, req.Color)
+		if err != nil {
+			slog.Error(
+				"failed to update note",
+				"err", err,
+			)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "OK")
+	})
+
+	mux.HandleFunc("DELETE /api/notes/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if id == "" {
+			slog.Error("id not specified")
+			http.Error(w, "id not specified.", http.StatusBadRequest)
+			return
+		}
+
+		notesDB := mongoDB.Collection("notes")
+		err := notes.DeleteNote(ctx, notesDB, id)
+		if err != nil {
+			slog.Error(
+				"failed to delete notes",
+				"err", err,
+			)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "OK")
 	})
 
 	go func() {

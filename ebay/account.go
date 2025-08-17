@@ -33,8 +33,8 @@ type AccountRequest struct {
 	BeginDate      string `xml:"BeginDate,omitempty"`
 	Currency       string `xml:"Currency,omitempty"`
 	EndDate        string `xml:"EndDate,omitempty"`
-	ExcludeBalance bool   `xml:"ExcludeBalance,omitempty"`
-	ExcludeSummary bool   `xml:"ExcludeSummary,omitempty"`
+	ExcludeBalance bool   `xml:"ExcludeBalance"`
+	ExcludeSummary bool   `xml:"ExcludeSummary"`
 	ItemID         string `xml:"ItemID,omitempty"`
 	OrderID        string `xml:"OrderID,omitempty"`
 	Pagination     struct {
