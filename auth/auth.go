@@ -287,6 +287,10 @@ func (c *Client) getUser(accessToken string) (string, error) {
 // 	return token.accessToken, nil
 // }
 
+// GetToken gets or refreshes a OAuth user token associated with a particular user.
+// A token has to be initialized for a user i.e. after AuthUser().
+// Otherwise, an error needs to be returned.
+// After, it can be and is usually made right before a request.
 func (c *Client) GetToken(ctx context.Context, user string) (string, error) {
 	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -398,4 +402,64 @@ func (c *Client) refreshToken(refreshToken string) (*TokenResponse, error) {
 	)
 
 	return &tokenResp, nil
+}
+
+// GetApplicationToken gets an OAuth application token using the client credentials grant flow.
+// This is used for application-level operations like accessing the Notification API.
+// https://developer.ebay.com/api-docs/static/oauth-client-credentials-grant.html
+func (c *Client) GetApplicationToken(ctx context.Context) (string, error) {
+	// base64 encode client_id:client_secret for Authorization header
+	auth := base64.StdEncoding.EncodeToString([]byte(c.ClientID + ":" + c.ClientSecret))
+
+	data := url.Values{}
+	data.Set("grant_type", "client_credentials")
+	data.Set("scope", "https://api.ebay.com/oauth/api_scope")
+
+	// TODO: CACHE THIS APPLICATION TOKEN
+
+	req, err := http.NewRequestWithContext(
+		ctx,
+		"POST",
+		c.AuthURL,
+		strings.NewReader(data.Encode()),
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to create token request; %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "Basic "+auth)
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to request token endpoint; %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response; %w", err)
+	}
+
+	var tokenResp TokenResponse
+	err = json.Unmarshal(body, &tokenResp)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse token response; %w", err)
+	}
+
+	if tokenResp.Error != "" {
+		return "", fmt.Errorf("eBay auth error: %s - %s", tokenResp.Error, tokenResp.ErrorDescription)
+	}
+
+	if tokenResp.AccessToken == "" {
+		return "", errors.New("empty access token in response")
+	}
+
+	htos := int(time.Hour / time.Second)
+	slog.Info(
+		"obtained application token",
+		"expires_in_hrs", (tokenResp.ExpiresIn / htos),
+	)
+
+	return tokenResp.AccessToken, nil
 }

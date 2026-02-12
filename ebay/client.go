@@ -29,6 +29,12 @@ type Client struct {
 	// https://api.sandbox.ebay.com/ws/api.dll for sandbox
 	TradURL string
 
+	// Notification specifies the URL that hosts the notification API.
+	// apiz.ebay.com doesn't work here!
+	// https://api.ebay.com for production
+	// https://api.sandbox.ebay.com for sandbox
+	NotificationURL string
+
 	// Auth contains auth-related functions.
 	// Used for loading in the respective user
 	// token at API request time.
