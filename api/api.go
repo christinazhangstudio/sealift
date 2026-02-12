@@ -1,6 +1,8 @@
 package api
 
-import "github.tesla.com/chrzhang/sealift/ebay"
+import (
+	"github.tesla.com/chrzhang/sealift/ebay"
+)
 
 // JSON responses sealift provides.
 type Error struct {
@@ -29,4 +31,29 @@ type UserListings struct {
 type UserAccount struct {
 	User    string                `json:"user"`
 	Account *ebay.AccountResponse `json:"account"`
+}
+
+// Notification API responses
+type NotificationTopic struct {
+	Topic *ebay.TopicResponse `json:"topic"`
+}
+
+type NotificationTopics struct {
+	Topics []ebay.TopicResponse `json:"topics"`
+}
+
+type NotificationDestination struct {
+	Destination *ebay.DestinationResponse `json:"destination"`
+}
+
+type NotificationDestinations struct {
+	Destinations []ebay.DestinationResponse `json:"destinations"`
+} 
+
+type NotificationSubscription struct {
+	Subscription *ebay.SubscriptionResponse `json:"subscription"`
+}
+
+type NotificationSubscriptions struct {
+	Subscriptions []ebay.SubscriptionResponse `json:"subscriptions"`
 }

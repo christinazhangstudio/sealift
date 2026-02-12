@@ -1,3 +1,4 @@
 cert/
 deploy/
 run.ps1
+*omit.md
