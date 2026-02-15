@@ -140,7 +140,11 @@ func (c *Client) GetTopics(ctx context.Context) ([]TopicResponse, error) {
 // This endpoint will receive a challenge code from eBay that must be respond to
 // with a hashed value to verify ownership (see /sealift-webhook).
 // https://developer.ebay.com/api-docs/commerce/notification/resources/destination/methods/createDestination
-func (c *Client) CreateDestination(ctx context.Context, endpoint string, verificationToken string) error {
+func (c *Client) CreateDestination(
+	ctx context.Context,
+	endpoint string,
+	verificationToken string,
+) error {
 	token, err := c.Auth.GetApplicationToken(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get or refresh user token; %w", err)
@@ -198,11 +202,128 @@ func (c *Client) GetDestinations(ctx context.Context) ([]DestinationResponse, er
 		return nil, fmt.Errorf("failed to get or refresh user token; %w", err)
 	}
 
-	// Create the request
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
 		c.NotificationURL+notificationAPI+"destination",
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("notification API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var destResp struct {
+		Destinations []DestinationResponse `json:"destinations"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&destResp); err != nil {
+		return nil, fmt.Errorf("failed to parse destinations response: %w", err)
+	}
+
+	return destResp.Destinations, nil
+}
+
+// CreateUserSubscription creates a subscription to a topic.
+// topicID must be from an available topic (e.g., "MARKETPLACE_ACCOUNT_DELETION").
+// https://developer.ebay.com/api-docs/commerce/notification/resources/subscription/methods/createSubscription
+func (c *Client) CreateUserSubscription(
+	ctx context.Context,
+	topicID string,
+	destinationID string,
+) (*SubscriptionResponse, error) {
+	// Use Application token for Application-level notifications,
+	// and User token for User-level notifications.
+	token, err := c.Auth.GetToken(ctx, ctx.Value(auth.USER).(string))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get or refresh user token; %w", err)
+	}
+
+	type payload struct {
+		DeliveryProtocol string `json:"deliveryProtocol"`
+		Format           string `json:"format"`
+		SchemaVersion    string `json:"schemaVersion"`
+	}
+
+	reqBody := struct {
+		DestinationID string  `json:"destinationId"`
+		TopicID       string  `json:"topicId"`
+		Status        string  `json:"status"`
+		Payload       payload `json:"payload"`
+	}{
+		DestinationID: destinationID,
+		TopicID:       topicID,
+		Status:        "ENABLED",
+		Payload: payload{
+			// Looks like all topics follow these specs,
+			// so just hardcode.
+			DeliveryProtocol: "HTTPS",
+			Format:           "JSON",
+			SchemaVersion:    "1.0",
+		},
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request body: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodPost,
+		c.NotificationURL+notificationAPI+"subscription",
+		bytes.NewReader(bodyBytes),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("notification API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var sub SubscriptionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&sub); err != nil {
+		return nil, fmt.Errorf("failed to parse subscription response: %w", err)
+	}
+
+	return &sub, nil
+}
+
+// GetSubscriptions retrieves all subscriptions for a user.
+// API docs: https://developer.ebay.com/api-docs/commerce/notification/resources/subscription/methods/getSubscriptions
+func (c *Client) GetUserSubscriptions(ctx context.Context) ([]SubscriptionResponse, error) {
+	// Use Application token for Application-level notifications,
+	// and User token for User-level notifications.
+	token, err := c.Auth.GetToken(ctx, ctx.Value(auth.USER).(string))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get or refresh user token; %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodGet,
+		c.NotificationURL+notificationAPI+"subscription",
 		nil,
 	)
 	if err != nil {
@@ -220,154 +341,67 @@ func (c *Client) GetDestinations(ctx context.Context) ([]DestinationResponse, er
 	}
 	defer resp.Body.Close()
 
-	// Handle error responses
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("notification API returned status %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Parse the response
-	var destResp struct {
-		Destinations []DestinationResponse `json:"destinations"`
+	var subsResp struct {
+		Subscriptions []SubscriptionResponse `json:"subscriptions"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&destResp); err != nil {
-		return nil, fmt.Errorf("failed to parse destinations response: %w", err)
+	if err := json.NewDecoder(resp.Body).Decode(&subsResp); err != nil {
+		return nil, fmt.Errorf("failed to parse subscriptions response: %w", err)
 	}
 
-	return destResp.Destinations, nil
+	return subsResp.Subscriptions, nil
 }
 
-// // CreateSubscription creates a subscription to a notification topic.
-// // The topicID must be from an available topic (e.g., "MARKETPLACE_ACCOUNT_DELETION").
-// // API docs: https://developer.ebay.com/api-docs/commerce/notification/resources/subscription/methods/createSubscription
-// func (c *Client) CreateSubscription(ctx context.Context, topicID, destinationID string) (*Subscription, error) {
-// 	if topicID == "" {
-// 		return nil, fmt.Errorf("topic ID cannot be empty")
-// 	}
-// 	if destinationID == "" {
-// 		return nil, fmt.Errorf("destination ID cannot be empty")
-// 	}
+// EnableUserSubscriptions enables all subscriptions for a user.
+// It retrieves all subscriptions and calls the /enable endpoint for each.
+// Returns the list of enabled subscriptions.
+func (c *Client) EnableUserSubscriptions(ctx context.Context) ([]SubscriptionResponse, error) {
+	// 1. Get all subscriptions
+	subs, err := c.GetUserSubscriptions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user subscriptions: %w", err)
+	}
 
-// 	// Build the request URL
-// 	endpoint := c.buildEndpoint("subscription")
+	// 2. Get User-level auth token for the enable calls
+	token, err := c.Auth.GetToken(ctx, ctx.Value(auth.USER).(string))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user token: %w", err)
+	}
 
-// 	// Prepare request body
-// 	reqBody := map[string]string{
-// 		"topicId":       topicID,
-// 		"destinationId": destinationID,
-// 	}
-// 	bodyBytes, err := json.Marshal(reqBody)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
-// 	}
+	// 3. Enable each subscription
+	for _, sub := range subs {
+		url := fmt.Sprintf("%s%ssubscription/%s/enable", c.NotificationURL, notificationAPI, sub.SubscriptionID)
+		req, err := http.NewRequestWithContext(
+			ctx,
+			http.MethodPost,
+			url,
+			nil,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create enable request for subscription %s: %w", sub.SubscriptionID, err)
+		}
 
-// 	// Create the request
-// 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
-// 	if err != nil {
-// 		return nil, fmt.Errorf("failed to create request: %w", err)
-// 	}
+		req.Header.Set("Authorization", "Bearer "+token)
 
-// 	// Set required headers
-// 	req.Header.Set("Authorization", "Bearer "+c.AccessToken)
-// 	req.Header.Set("Content-Type", "application/json")
+		resp, err := c.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to enable subscription %s: %w", sub.SubscriptionID, err)
+		}
 
-// 	// Execute the request
-// 	resp, err := c.Do(req)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("failed to execute request: %w", err)
-// 	}
-// 	defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("failed to enable subscription %s (status %d): %s", sub.SubscriptionID, resp.StatusCode, string(body))
+		}
+		resp.Body.Close()
+	}
 
-// 	// Handle error responses
-// 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-// 		body, _ := io.ReadAll(resp.Body)
-// 		return nil, fmt.Errorf("notification API returned status %d: %s", resp.StatusCode, string(body))
-// 	}
-
-// 	// Parse the response
-// 	var sub Subscription
-// 	if err := json.NewDecoder(resp.Body).Decode(&sub); err != nil {
-// 		return nil, fmt.Errorf("failed to parse subscription response: %w", err)
-// 	}
-
-// 	return &sub, nil
-// }
-
-// // GetSubscriptions retrieves all subscriptions.
-// // API docs: https://developer.ebay.com/api-docs/commerce/notification/resources/subscription/methods/getSubscriptions
-// func (c *Client) GetSubscriptions(ctx context.Context) ([]Subscription, error) {
-// 	// Build the request URL
-// 	endpoint := c.buildEndpoint("subscription")
-
-// 	// Create the request
-// 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("failed to create request: %w", err)
-// 	}
-
-// 	// Set required headers
-// 	req.Header.Set("Authorization", "Bearer "+c.AccessToken)
-// 	req.Header.Set("Content-Type", "application/json")
-
-// 	// Execute the request
-// 	resp, err := c.Do(req)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("failed to execute request: %w", err)
-// 	}
-// 	defer resp.Body.Close()
-
-// 	// Handle error responses
-// 	if resp.StatusCode != http.StatusOK {
-// 		body, _ := io.ReadAll(resp.Body)
-// 		return nil, fmt.Errorf("notification API returned status %d: %s", resp.StatusCode, string(body))
-// 	}
-
-// 	// Parse the response
-// 	var subsResp struct {
-// 		Subscriptions []Subscription `json:"subscriptions"`
-// 	}
-// 	if err := json.NewDecoder(resp.Body).Decode(&subsResp); err != nil {
-// 		return nil, fmt.Errorf("failed to parse subscriptions response: %w", err)
-// 	}
-
-// 	return subsResp.Subscriptions, nil
-// }
-
-// // EnableSubscription enables a subscription to start receiving notifications.
-// // API docs: https://developer.ebay.com/api-docs/commerce/notification/resources/subscription/methods/enableSubscription
-// func (c *Client) EnableSubscription(ctx context.Context, subscriptionID string) error {
-// 	if subscriptionID == "" {
-// 		return fmt.Errorf("subscription ID cannot be empty")
-// 	}
-
-// 	// Build the request URL
-// 	endpoint := c.buildEndpoint("subscription", subscriptionID, "enable")
-
-// 	// Create the request
-// 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
-// 	if err != nil {
-// 		return fmt.Errorf("failed to create request: %w", err)
-// 	}
-
-// 	// Set required headers
-// 	req.Header.Set("Authorization", "Bearer "+c.AccessToken)
-// 	req.Header.Set("Content-Type", "application/json")
-
-// 	// Execute the request
-// 	resp, err := c.Do(req)
-// 	if err != nil {
-// 		return fmt.Errorf("failed to execute request: %w", err)
-// 	}
-// 	defer resp.Body.Close()
-
-// 	// Handle error responses
-// 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-// 		body, _ := io.ReadAll(resp.Body)
-// 		return fmt.Errorf("notification API returned status %d: %s", resp.StatusCode, string(body))
-// 	}
-
-// 	return nil
-// }
+	return subs, nil
+}
 
 // // DisableSubscription disables a subscription to stop receiving notifications.
 // // API docs: https://developer.ebay.com/api-docs/commerce/notification/resources/subscription/methods/disableSubscription
