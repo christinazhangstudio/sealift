@@ -13,6 +13,7 @@ docker run -d `
     -e "EBAY_CLIENT_ID=<>" `
     -e "EBAY_CLIENT_SECRET=<>" `
     -e "EBAY_URL=https://apiz.ebay.com" `
+    -e "EBAY_NOTIFICATION_URL=https://api.ebay.com" `
     -e "EBAY_AUTH_URL=https://api.ebay.com/identity/v1/oauth2/token" `
     -e "EBAY_AUTH_REDIRECT_URI=<>" `
     -e "EBAY_SIGN_IN=<>" `

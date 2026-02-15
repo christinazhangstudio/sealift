@@ -5,6 +5,9 @@ for any temporary testing at a web-exposed URL:
 ```
 ngrok.exe http --host-header=rewrite http://localhost:443
 ```
+ngrok will show a HTML page with a browser warning by default.
+To circumvent this, can add `ngrok-skip-browser-warning` to a request header. Chrome extension Requestly is the more automated way to do this:
+![requestly](./docs/img/requestly.png)
 
 ```
 docker build -t sealift:latest .

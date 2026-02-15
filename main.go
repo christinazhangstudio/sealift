@@ -656,7 +656,7 @@ func main() {
 	})
 
 	// Create a notification destination for a seller (auto-generated URL)
-	mux.HandleFunc("POST /api/notification/{user}/destination", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/notification/users/{user}/destination", func(w http.ResponseWriter, r *http.Request) {
 		user := r.PathValue("user")
 		if user == "" {
 			http.Error(w, "user not specified", http.StatusBadRequest)
@@ -695,108 +695,87 @@ func main() {
 	})
 
 	// Create a notification subscription for a seller
-	// mux.HandleFunc("POST /api/notification/{user}/subscription", func(w http.ResponseWriter, r *http.Request) {
-	// 	user := r.PathValue("user")
-	// 	if user == "" {
-	// 		http.Error(w, "user not specified", http.StatusBadRequest)
-	// 		return
-	// 	}
+	mux.HandleFunc("POST /api/notification/users/{user}/subscription", func(w http.ResponseWriter, r *http.Request) {
+		user := r.PathValue("user")
+		if user == "" {
+			http.Error(w, "user not specified", http.StatusBadRequest)
+			return
+		}
 
-	// 	var req struct {
-	// 		TopicID       string `json:"topicId"`
-	// 		DestinationID string `json:"destinationId"`
-	// 	}
+		var req struct {
+			TopicID       string `json:"topicId"`
+			DestinationID string `json:"destinationId"`
+		}
 
-	// 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-	// 		slog.Error("invalid request body", "err", err)
-	// 		http.Error(w, "invalid request body", http.StatusBadRequest)
-	// 		return
-	// 	}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			slog.Error("invalid request body", "err", err)
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
 
-	// 	if req.TopicID == "" || req.DestinationID == "" {
-	// 		http.Error(w, "topicId and destinationId are required", http.StatusBadRequest)
-	// 		return
-	// 	}
+		if req.TopicID == "" || req.DestinationID == "" {
+			http.Error(w, "topicId and destinationId are required", http.StatusBadRequest)
+			return
+		}
 
-	// 	slog.Info("received request to create notification subscription", "user", user, "topicId", req.TopicID)
+		slog.Info("received request to create notification subscription", "user", user, "topicId", req.TopicID)
 
-	// 	token, err := client.Auth.GetToken(ctx, user)
-	// 	if err != nil {
-	// 		slog.Error("failed to get user token", "err", err, "user", user)
-	// 		http.Error(w, "user not authenticated", http.StatusUnauthorized)
-	// 		return
-	// 	}
+		ctx = context.WithValue(ctx, auth.USER, user)
+		sub, err := client.CreateUserSubscription(ctx, req.TopicID, req.DestinationID)
+		if err != nil {
+			slog.Error("failed to create subscription", "err", err, "user", user)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 
-	// 	notificationClient.AccessToken = token
-	// 	sub, err := notificationClient.CreateSubscription(ctx, req.TopicID, req.DestinationID)
-	// 	if err != nil {
-	// 		slog.Error("failed to create subscription", "err", err, "user", user)
-	// 		http.Error(w, err.Error(), http.StatusInternalServerError)
-	// 		return
-	// 	}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(api.NotificationSubscription{Subscription: sub})
+	})
 
-	// 	w.Header().Set("Content-Type", "application/json")
-	// 	w.WriteHeader(http.StatusCreated)
-	// 	json.NewEncoder(w).Encode(api.NotificationSubscription{Subscription: sub})
-	// })
+	// Get subscriptions for a seller
+	mux.HandleFunc("GET /api/notification/users/{user}/subscriptions", func(w http.ResponseWriter, r *http.Request) {
+		user := r.PathValue("user")
+		if user == "" {
+			http.Error(w, "user not specified", http.StatusBadRequest)
+			return
+		}
 
-	// // Get subscriptions for a seller
-	// mux.HandleFunc("GET /api/notification/{user}/subscriptions", func(w http.ResponseWriter, r *http.Request) {
-	// 	user := r.PathValue("user")
-	// 	if user == "" {
-	// 		http.Error(w, "user not specified", http.StatusBadRequest)
-	// 		return
-	// 	}
+		slog.Info("received request for notification subscriptions", "user", user)
 
-	// 	slog.Info("received request for notification subscriptions", "user", user)
+		ctx = context.WithValue(ctx, auth.USER, user)
+		subs, err := client.GetUserSubscriptions(ctx)
+		if err != nil {
+			slog.Error("failed to get subscriptions", "err", err, "user", user)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 
-	// 	token, err := client.Auth.GetToken(ctx, user)
-	// 	if err != nil {
-	// 		slog.Error("failed to get user token", "err", err, "user", user)
-	// 		http.Error(w, "user not authenticated", http.StatusUnauthorized)
-	// 		return
-	// 	}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(api.NotificationSubscriptions{Subscriptions: subs})
+	})
 
-	// 	notificationClient.AccessToken = token
-	// 	subscriptions, err := notificationClient.GetSubscriptions(ctx)
-	// 	if err != nil {
-	// 		slog.Error("failed to get subscriptions", "err", err, "user", user)
-	// 		http.Error(w, err.Error(), http.StatusInternalServerError)
-	// 		return
-	// 	}
+	// Enable a subscription for a seller
+	mux.HandleFunc("POST /api/notification/users/{user}/subscriptions/enable", func(w http.ResponseWriter, r *http.Request) {
+		user := r.PathValue("user")
+		if user == "" {
+			http.Error(w, "user not specified", http.StatusBadRequest)
+			return
+		}
 
-	// 	w.Header().Set("Content-Type", "application/json")
-	// 	json.NewEncoder(w).Encode(api.NotificationSubscriptions{Subscriptions: subscriptions})
-	// })
+		slog.Info("received request to enable subscriptions", "user", user)
 
-	// // Enable a subscription for a seller
-	// mux.HandleFunc("POST /api/notification/{user}/subscription/{subscriptionId}/enable", func(w http.ResponseWriter, r *http.Request) {
-	// 	user := r.PathValue("user")
-	// 	subscriptionID := r.PathValue("subscriptionId")
-	// 	if user == "" || subscriptionID == "" {
-	// 		http.Error(w, "user and subscription ID required", http.StatusBadRequest)
-	// 		return
-	// 	}
+		ctx = context.WithValue(ctx, auth.USER, user)
+		subs, err := client.EnableUserSubscriptions(ctx)
+		if err != nil {
+			slog.Error("failed to enable subscriptions", "err", err, "user", user)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 
-	// 	slog.Info("received request to enable subscription", "user", user, "subscriptionId", subscriptionID)
-
-	// 	token, err := client.Auth.GetToken(ctx, user)
-	// 	if err != nil {
-	// 		slog.Error("failed to get user token", "err", err, "user", user)
-	// 		http.Error(w, "user not authenticated", http.StatusUnauthorized)
-	// 		return
-	// 	}
-
-	// 	notificationClient.AccessToken = token
-	// 	err = notificationClient.EnableSubscription(ctx, subscriptionID)
-	// 	if err != nil {
-	// 		slog.Error("failed to enable subscription", "err", err, "user", user)
-	// 		http.Error(w, err.Error(), http.StatusInternalServerError)
-	// 		return
-	// 	}
-
-	// 	w.WriteHeader(http.StatusNoContent)
-	// })
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(api.NotificationSubscriptions{Subscriptions: subs})
+	})
 
 	// // Disable a subscription for a seller
 	// mux.HandleFunc("POST /api/notification/{user}/subscription/{subscriptionId}/disable", func(w http.ResponseWriter, r *http.Request) {
