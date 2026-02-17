@@ -42,16 +42,25 @@ type NotificationTopics struct {
 	Topics []ebay.TopicResponse `json:"topics"`
 }
 
-type NotificationDestination struct {
-	Destination *ebay.DestinationResponse `json:"destination"`
+// ebay.DestinationsResponse is App-level, but we want
+// user-ordered destinations, so we'll transform (and basically invert)
+// the response since this suits our app.
+// This breaks for user-level-pagination,
+// but this is ok enough given the way this eBay API is set up,
+// and this endpoint is largely for debugging.
+type NotificationDestinations struct {
+	UserDestinations []UserDestination `json:"userDestinations"`
+	Next             string            `json:"next"`
+	Total            int               `json:"total"`
 }
 
-type NotificationDestinations struct {
-	Destinations []ebay.DestinationResponse `json:"destinations"`
-} 
+type UserDestination struct {
+	User         string             `json:"user"`
+	Destinations []ebay.Destination `json:"destinations"`
+}
 
-type NotificationSubscription struct {
-	Subscription *ebay.SubscriptionResponse `json:"subscription"`
+type CreateUserSubscription struct {
+	SubscriptionID string `json:"subscriptionID"`
 }
 
 type NotificationSubscriptions struct {

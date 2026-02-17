@@ -43,3 +43,10 @@ host.docker.internal    # resolves to host IP, for container isolation
 docker run ... --network host   # share host network stack
 ipconfig    # use LAN/Ethernet IPv4 instead of 127.0.0.1
 ```
+
+If you get:
+```
+ERROR failed to create destination (non-fatal) err="notification API returned status 409: {\"errors\":[{\"errorId\":195020,\"domain\":\"API_NOTIFICATION\",\"category\":\"REQUEST\",\"message\":\"Challenge verification failed for requested endpoint.\"}]}"
+```
+
+just remember to set `ENDPOINT_URL`.
