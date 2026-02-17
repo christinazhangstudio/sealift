@@ -4,11 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"path"
+	"strconv"
+	"time"
 
 	"github.tesla.com/chrzhang/sealift/auth"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 const (
@@ -33,16 +40,17 @@ type PayloadDetail struct {
 	Deprecated       bool     `json:"deprecated"`
 }
 
-// DestinationResponse represents a notification destination endpoint.
-type DestinationResponse struct {
-	DestinationID string `json:"destinationId"`
-	URL           string `json:"url"`
-	Status        string `json:"status"`
-	CreatedDate   string `json:"createdDate,omitempty"`
-	UpdatedDate   string `json:"updatedDate,omitempty"`
+type Destination struct {
+	DestinationID  string `json:"destinationId"`
+	DeliveryConfig struct {
+		Endpoint string `json:"endpoint"`
+		// omit verificationToken
+		// VerificationToken string `json:"verificationToken"`
+	} `json:"deliveryConfig"`
+	Name   string `json:"name"`   // created to match the "user"
+	Status string `json:"status"` // ENABLED, DISABLED, MARKED_DOWN
 }
 
-// SubscriptionResponse represents a notification subscription.
 type SubscriptionResponse struct {
 	SubscriptionID string `json:"subscriptionId"`
 	TopicID        string `json:"topicId"`
@@ -147,7 +155,7 @@ func (c *Client) CreateDestination(
 ) error {
 	token, err := c.Auth.GetApplicationToken(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get or refresh user token; %w", err)
+		return fmt.Errorf("failed to get application token; %w", err)
 	}
 
 	reqBody := map[string]interface{}{
@@ -188,15 +196,115 @@ func (c *Client) CreateDestination(
 	}
 
 	// only Location header is returned, no body
-	if loc := resp.Header.Get("Location"); loc != "" {
-		fmt.Println("CreateDestination returned location header:", loc)
+	loc := resp.Header.Get("Location")
+	if loc == "" {
+		return fmt.Errorf("notification API returned no location header")
+	}
+
+	slog.Info("created notification destination", "loc", loc)
+
+	user := ctx.Value(auth.USER).(string)
+	// loc returned in the format:
+	// https://api.ebay.com/commerce/notification/v1/destination/{destinationId}
+	destinationID := path.Base(loc)
+	if err := c.updateUserDestination(ctx, user, destinationID); err != nil {
+		return fmt.Errorf("failed to update user destination in DB: %w", err)
 	}
 
 	return nil
 }
 
+// DeleteDestination deletes a notification destination.
+// https://developer.ebay.com/api-docs/commerce/notification/resources/destination/methods/deleteDestination
+func (c *Client) DeleteDestination(ctx context.Context, destinationID string) error {
+	token, err := c.Auth.GetApplicationToken(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get application token; %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodDelete,
+		c.NotificationURL+notificationAPI+"destination/"+destinationID,
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to execute request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("notification API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+func (c *Client) updateUserDestination(
+	ctx context.Context,
+	user string,
+	destinationID string,
+) error {
+	filter := bson.D{{Key: "user", Value: user}}
+	update := bson.M{
+		"$set": bson.M{
+			"destination_id": destinationID,
+		},
+	}
+
+	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	result, err := c.DB.UpdateOne(dbCtx, filter, update)
+	if err != nil {
+		return fmt.Errorf("failed to update user destination; %w", err)
+	}
+
+	if result.MatchedCount == 0 {
+		return errors.New("user somehow does not exist after auth flow")
+	}
+
+	return nil
+}
+
+func (c *Client) GetUserDestinationID(ctx context.Context, user string) (string, error) {
+	filter := bson.D{{Key: "user", Value: user}}
+	var result struct {
+		DestinationID string `bson:"destination_id"`
+	}
+
+	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	err := c.DB.FindOne(dbCtx, filter).Decode(&result)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return "", nil
+		}
+		return "", fmt.Errorf("failed to get user destination; %w", err)
+	}
+
+	return result.DestinationID, nil
+}
+
+type DestinationsResponse struct {
+	Destinations []Destination `json:"destinations"`
+	Href         string        `json:"href"`
+	Limit        int           `json:"limit"`
+	Next         string        `json:"next"`
+	Total        int           `json:"total"`
+}
+
 // GetDestinations retrieves all notification destinations.
-func (c *Client) GetDestinations(ctx context.Context) ([]DestinationResponse, error) {
+func (c *Client) GetDestinations(ctx context.Context, pageSize int) (*DestinationsResponse, error) {
 	token, err := c.Auth.GetApplicationToken(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get or refresh user token; %w", err)
@@ -212,6 +320,10 @@ func (c *Client) GetDestinations(ctx context.Context) ([]DestinationResponse, er
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
+	q := req.URL.Query()
+	q.Set("limit", strconv.Itoa(pageSize))
+	req.URL.RawQuery = q.Encode()
+
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -226,14 +338,12 @@ func (c *Client) GetDestinations(ctx context.Context) ([]DestinationResponse, er
 		return nil, fmt.Errorf("notification API returned status %d: %s", resp.StatusCode, string(body))
 	}
 
-	var destResp struct {
-		Destinations []DestinationResponse `json:"destinations"`
-	}
+	var destResp DestinationsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&destResp); err != nil {
 		return nil, fmt.Errorf("failed to parse destinations response: %w", err)
 	}
 
-	return destResp.Destinations, nil
+	return &destResp, nil
 }
 
 // CreateUserSubscription creates a subscription to a topic.
@@ -242,13 +352,18 @@ func (c *Client) GetDestinations(ctx context.Context) ([]DestinationResponse, er
 func (c *Client) CreateUserSubscription(
 	ctx context.Context,
 	topicID string,
-	destinationID string,
-) (*SubscriptionResponse, error) {
+) (string, error) {
 	// Use Application token for Application-level notifications,
 	// and User token for User-level notifications.
-	token, err := c.Auth.GetToken(ctx, ctx.Value(auth.USER).(string))
+	user := ctx.Value(auth.USER).(string)
+	token, err := c.Auth.GetToken(ctx, user)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get or refresh user token; %w", err)
+		return "", fmt.Errorf("failed to get or refresh user token; %w", err)
+	}
+
+	destinationID, err := c.GetUserDestinationID(ctx, user)
+	if err != nil || destinationID == "" {
+		return "", fmt.Errorf("failed to get destination ID for user %s: %w", user, err)
 	}
 
 	type payload struct {
@@ -277,7 +392,7 @@ func (c *Client) CreateUserSubscription(
 
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		return "", fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(
@@ -286,7 +401,7 @@ func (c *Client) CreateUserSubscription(
 		bytes.NewReader(bodyBytes),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -294,21 +409,27 @@ func (c *Client) CreateUserSubscription(
 
 	resp, err := c.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute request: %w", err)
+		return "", fmt.Errorf("failed to execute request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("notification API returned status %d: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("notification API returned status %d: %s", resp.StatusCode, string(body))
 	}
 
-	var sub SubscriptionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&sub); err != nil {
-		return nil, fmt.Errorf("failed to parse subscription response: %w", err)
+	// only Location header is returned, no body
+	loc := resp.Header.Get("Location")
+	if loc == "" {
+		return "", fmt.Errorf("notification API returned no location header")
 	}
 
-	return &sub, nil
+	slog.Info("created notification destination", "loc", loc)
+
+	// loc returned in the format:
+	// https://api.ebay.com/commerce/notification/v1/subscription/{subscriptionId}
+	subscriptionID := path.Base(loc)
+	return subscriptionID, nil
 }
 
 // GetSubscriptions retrieves all subscriptions for a user.
@@ -402,39 +523,3 @@ func (c *Client) EnableUserSubscriptions(ctx context.Context) ([]SubscriptionRes
 
 	return subs, nil
 }
-
-// // DisableSubscription disables a subscription to stop receiving notifications.
-// // API docs: https://developer.ebay.com/api-docs/commerce/notification/resources/subscription/methods/disableSubscription
-// func (c *Client) DisableSubscription(ctx context.Context, subscriptionID string) error {
-// 	if subscriptionID == "" {
-// 		return fmt.Errorf("subscription ID cannot be empty")
-// 	}
-
-// 	// Build the request URL
-// 	endpoint := c.buildEndpoint("subscription", subscriptionID, "disable")
-
-// 	// Create the request
-// 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
-// 	if err != nil {
-// 		return fmt.Errorf("failed to create request: %w", err)
-// 	}
-
-// 	// Set required headers
-// 	req.Header.Set("Authorization", "Bearer "+c.AccessToken)
-// 	req.Header.Set("Content-Type", "application/json")
-
-// 	// Execute the request
-// 	resp, err := c.Do(req)
-// 	if err != nil {
-// 		return fmt.Errorf("failed to execute request: %w", err)
-// 	}
-// 	defer resp.Body.Close()
-
-// 	// Handle error responses
-// 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-// 		body, _ := io.ReadAll(resp.Body)
-// 		return fmt.Errorf("notification API returned status %d: %s", resp.StatusCode, string(body))
-// 	}
-
-// 	return nil
-// }

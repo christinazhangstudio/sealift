@@ -186,20 +186,32 @@ func main() {
 	mux.HandleFunc("/api/auth-callback", func(w http.ResponseWriter, r *http.Request) {
 		authCode := r.URL.Query().Get("code")
 		if authCode == "" {
-			slog.Error("missing auth code")
-			html.RenderAuthError(w, "missing auth code", frontendURL)
+			slog.Error("missing auth code", "query", r.URL.Query().Encode())
+			html.RenderAuthError(w, "missing auth code: "+r.URL.Query().Encode(), frontendURL)
 			return
 		}
 
 		slog.Info("received auth code in callback")
 
-		err := client.Auth.AuthUser(ctx, authCode)
+		user, err := client.Auth.AuthUser(ctx, authCode)
 		if err != nil {
 			slog.Error("failed to auth user", "err", err)
 			html.RenderAuthError(w, "failed to auth user", frontendURL)
+			return
 		}
 
-		slog.Info("seller authorized to service")
+		slog.Info("seller authorized to service", "user", user)
+
+		// Auto-create notification destination for this new user.
+		// CreateDestination uses Application Token,
+		// so the user context is mainly passing the user ID down.
+		authCtx := context.WithValue(ctx, auth.USER, user)
+		destinationURL := fmt.Sprintf("%s/%s", endpointURL, user)
+		if err := client.CreateDestination(authCtx, destinationURL, verificationToken); err != nil {
+			slog.Error("failed to create destination (non-fatal)", "err", err, "user", user)
+		} else {
+			slog.Info("successfully created notification destination", "user", user)
+		}
 
 		html.RenderAuthSuccess(w, frontendURL)
 	})
@@ -238,7 +250,12 @@ func main() {
 		defer cancel()
 
 		filter := bson.D{{Key: "user", Value: user}}
-		err := client.DB.FindOne(dbCtx, filter).Err()
+
+		// Find user first to get destination ID
+		var userDoc struct {
+			DestinationID string `bson:"destination_id"`
+		}
+		err := client.DB.FindOne(dbCtx, filter).Decode(&userDoc)
 		if err == mongo.ErrNoDocuments {
 			slog.Error(
 				"user not found",
@@ -252,8 +269,19 @@ func main() {
 				"failed to find user",
 				"err", err,
 			)
-			http.Error(w, err.Error(), http.StatusNotFound)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+
+		// Delete destination if it exists
+		if userDoc.DestinationID != "" {
+			slog.Info("deleting notification destination", "user", user, "destinationId", userDoc.DestinationID)
+			// Attempt to delete destination, but don't block user deletion on failure
+			if err := client.DeleteDestination(ctx, userDoc.DestinationID); err != nil {
+				slog.Error("failed to delete notification destination", "err", err, "user", user)
+			} else {
+				slog.Info("deleted notification destination", "destinationId", userDoc.DestinationID)
+			}
 		}
 
 		result, err := client.DB.DeleteOne(dbCtx, filter)
@@ -655,43 +683,87 @@ func main() {
 		json.NewEncoder(w).Encode(api.NotificationTopics{Topics: topics})
 	})
 
-	// Create a notification destination for a seller (auto-generated URL)
-	mux.HandleFunc("POST /api/notification/users/{user}/destination", func(w http.ResponseWriter, r *http.Request) {
-		user := r.PathValue("user")
-		if user == "" {
-			http.Error(w, "user not specified", http.StatusBadRequest)
-			return
-		}
-
-		destinationURL := fmt.Sprintf("%s/%s", endpointURL, user)
-
-		slog.Info("creating notification destination for seller", "user", user, "url", destinationURL)
-
-		ctx = context.WithValue(ctx, auth.USER, user)
-		if err := client.CreateDestination(ctx, destinationURL, verificationToken); err != nil {
-			slog.Error("failed to create destination", "err", err, "user", user)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		slog.Info("created notification destination for seller", "user", user)
-
-		w.WriteHeader(http.StatusCreated)
-		fmt.Fprint(w, "OK")
-	})
-
-	// Get notification destinations (needed for subscription)
+	// Get notification destinations (debug only)
 	mux.HandleFunc("GET /api/notification/destinations", func(w http.ResponseWriter, r *http.Request) {
-		dests, err := client.GetDestinations(ctx)
+		defaultPageSize := 100 // maximum allowed by ebay, actual default is 20
+		pageSize, err := strconv.Atoi(r.URL.Query().Get("pageSize"))
+		if err != nil {
+			slog.Info(
+				"missing page size; using default value",
+				"pageSize", defaultPageSize,
+			)
+			pageSize = defaultPageSize
+		}
+
+		dests, err := client.GetDestinations(ctx, pageSize)
 		if err != nil {
 			slog.Error("failed to create destination", "err", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
+		// Group destinations by user (using the Name field)
+		userDestMap := make(map[string][]ebay.Destination)
+		for _, d := range dests.Destinations {
+			user := d.Name
+			userDestMap[user] = append(userDestMap[user], d)
+		}
+
+		// Convert map to slice for the response
+		var userDestinations []api.UserDestination
+
+		for user, userDests := range userDestMap {
+			userDestinations = append(userDestinations, api.UserDestination{
+				User:         user,
+				Destinations: userDests,
+			})
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(api.NotificationDestinations{Destinations: dests})
+		json.NewEncoder(w).Encode(api.NotificationDestinations{
+			UserDestinations: userDestinations,
+			Next:             dests.Next,
+			Total:            dests.Total,
+		})
+	})
+
+	// Delete ALL notification destinations
+	// Likely only used during development and troubleshooting.
+	mux.HandleFunc("DELETE /api/notification/destinations/unused", func(w http.ResponseWriter, r *http.Request) {
+		slog.Info("received request to delete unused destinations")
+		// Get all destinations
+		// Use a large limit to hopefully get all of them.
+		pageSize := 100
+		dests, err := client.GetDestinations(ctx, pageSize)
+		if err != nil {
+			slog.Error("failed to get destinations", "err", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		deletedCount := 0
+		errCount := 0
+		for _, d := range dests.Destinations {
+			// delete all the notifications
+			// EXCEPT for the one used for the app's webhooks
+			// (which won't have a user associated to its name field)
+			if d.Name != "" {
+				if err := client.DeleteDestination(ctx, d.DestinationID); err != nil {
+					slog.Error("failed to delete destination", "destinationId", d.DestinationID, "err", err)
+					errCount++
+				} else {
+					deletedCount++
+				}
+			}
+		}
+
+		resp := map[string]interface{}{
+			"deleted_count": deletedCount,
+			"error_count":   errCount,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
 	})
 
 	// Create a notification subscription for a seller
@@ -703,8 +775,7 @@ func main() {
 		}
 
 		var req struct {
-			TopicID       string `json:"topicId"`
-			DestinationID string `json:"destinationId"`
+			TopicID string `json:"topicId"`
 		}
 
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -713,15 +784,15 @@ func main() {
 			return
 		}
 
-		if req.TopicID == "" || req.DestinationID == "" {
-			http.Error(w, "topicId and destinationId are required", http.StatusBadRequest)
+		if req.TopicID == "" {
+			http.Error(w, "topicId is required", http.StatusBadRequest)
 			return
 		}
 
 		slog.Info("received request to create notification subscription", "user", user, "topicId", req.TopicID)
 
 		ctx = context.WithValue(ctx, auth.USER, user)
-		sub, err := client.CreateUserSubscription(ctx, req.TopicID, req.DestinationID)
+		subID, err := client.CreateUserSubscription(ctx, req.TopicID)
 		if err != nil {
 			slog.Error("failed to create subscription", "err", err, "user", user)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -730,7 +801,7 @@ func main() {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(api.NotificationSubscription{Subscription: sub})
+		json.NewEncoder(w).Encode(api.CreateUserSubscription{SubscriptionID: subID})
 	})
 
 	// Get subscriptions for a seller

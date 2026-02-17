@@ -59,15 +59,13 @@ type Client struct {
 	DevID string
 }
 
-// UserDocument represents a document associating user with their OAuth token.
-// if bson tag is not specified, mongo driver uses lowercase of the field name,
-// but bson tags are useful if struct fields are renamed and thereby save some
-// inconsistency issues at no functional cost.
+// UserTokenDocument represents the user document in MongoDB.
 type UserTokenDocument struct {
-	User         string    `bson:"user"`
-	AccessToken  string    `bson:"access_token"`
-	RefreshToken string    `bson:"refresh_token"`
-	ExpiresAt    time.Time `bson:"expires_at,omitempty"`
+	User                 string    `bson:"user"`
+	AccessToken          string    `bson:"access_token"`
+	RefreshToken         string    `bson:"refresh_token"`
+	ExpiresAt            time.Time `bson:"expires_at,omitempty"`
+	NotificationEndpoint string    `bson:"notification_endpoint,omitempty"`
 }
 
 // GetUsers returns all the users this app has registered.
@@ -95,15 +93,16 @@ func (c *Client) GetUsers(ctx context.Context) ([]string, error) {
 }
 
 // AuthUser is the initial flow when a user consents through auth-callback.
-func (c *Client) AuthUser(ctx context.Context, authCode string) error {
+// Returns the authenticated user ID.
+func (c *Client) AuthUser(ctx context.Context, authCode string) (string, error) {
 	tokenResp, err := c.getUserToken(authCode)
 	if err != nil {
-		return fmt.Errorf("failed to get user token; %w", err)
+		return "", fmt.Errorf("failed to get user token; %w", err)
 	}
 
 	user, err := c.getUser(tokenResp.AccessToken)
 	if err != nil {
-		return fmt.Errorf("failed to get user; %w", err)
+		return "", fmt.Errorf("failed to get user; %w", err)
 	}
 
 	// c.Sellers.Lock()
@@ -116,7 +115,7 @@ func (c *Client) AuthUser(ctx context.Context, authCode string) error {
 
 	loc, err := time.LoadLocation(timezone)
 	if err != nil {
-		return fmt.Errorf("failed to load timezone: %w", err)
+		return "", fmt.Errorf("failed to load timezone: %w", err)
 	}
 
 	expiresAt := time.Now().In(loc).Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
@@ -138,7 +137,7 @@ func (c *Client) AuthUser(ctx context.Context, authCode string) error {
 	opts := options.Update().SetUpsert(true)
 	result, err := c.DB.UpdateOne(dbCtx, filter, update, opts)
 	if err != nil {
-		return fmt.Errorf("failed to insert user; %w", err)
+		return "", fmt.Errorf("failed to insert user; %w", err)
 	}
 	slog.Info(
 		"upserted user token document",
@@ -149,7 +148,7 @@ func (c *Client) AuthUser(ctx context.Context, authCode string) error {
 
 	slog.Info("authorized new user", "user", user)
 
-	return nil
+	return user, nil
 }
 
 // TokenResponse represents the eBay OAuth token response.
