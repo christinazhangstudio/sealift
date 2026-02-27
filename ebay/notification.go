@@ -76,7 +76,7 @@ func (c *Client) GetTopic(ctx context.Context, topicID string) (*TopicResponse, 
 		nil,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create request; %w", err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -84,21 +84,21 @@ func (c *Client) GetTopic(ctx context.Context, topicID string) (*TopicResponse, 
 
 	resp, err := c.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute request: %w", err)
+		return nil, fmt.Errorf("failed to execute request; %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		var errResp map[string]interface{}
 		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
-			return nil, fmt.Errorf("notification API returned status %d: %w", resp.StatusCode, err)
+			return nil, fmt.Errorf("notification API returned status %d; %w", resp.StatusCode, err)
 		}
 		return nil, fmt.Errorf("notification API returned status %d: %v", resp.StatusCode, errResp)
 	}
 
 	var topic TopicResponse
 	if err := json.NewDecoder(resp.Body).Decode(&topic); err != nil {
-		return nil, fmt.Errorf("failed to parse topic response: %w", err)
+		return nil, fmt.Errorf("failed to parse topic response; %w", err)
 	}
 
 	return &topic, nil
@@ -122,14 +122,14 @@ func (c *Client) GetTopics(ctx context.Context) ([]TopicResponse, error) {
 
 	resp, err := c.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute request: %w", err)
+		return nil, fmt.Errorf("failed to execute request; %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		var errResp map[string]interface{}
 		if err := json.NewDecoder(resp.Body).Decode(&errResp); err != nil {
-			return nil, fmt.Errorf("notification API returned status %d: %w", resp.StatusCode, err)
+			return nil, fmt.Errorf("notification API returned status %d; %w", resp.StatusCode, err)
 		}
 		return nil, fmt.Errorf("notification API returned status %d: %v", resp.StatusCode, errResp)
 	}
@@ -138,7 +138,7 @@ func (c *Client) GetTopics(ctx context.Context) ([]TopicResponse, error) {
 		Topics []TopicResponse `json:"topics"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&topicsResp); err != nil {
-		return nil, fmt.Errorf("failed to parse topics response: %w", err)
+		return nil, fmt.Errorf("failed to parse topics response; %w", err)
 	}
 
 	return topicsResp.Topics, nil
@@ -169,7 +169,7 @@ func (c *Client) CreateDestination(
 
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return fmt.Errorf("failed to marshal request body: %w", err)
+		return fmt.Errorf("failed to marshal request body; %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(
@@ -178,7 +178,7 @@ func (c *Client) CreateDestination(
 		bytes.NewReader(bodyBytes),
 	)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return fmt.Errorf("failed to create request; %w", err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -186,7 +186,7 @@ func (c *Client) CreateDestination(
 
 	resp, err := c.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to execute request: %w", err)
+		return fmt.Errorf("failed to execute request; %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -208,9 +208,62 @@ func (c *Client) CreateDestination(
 	// https://api.ebay.com/commerce/notification/v1/destination/{destinationId}
 	destinationID := path.Base(loc)
 	if err := c.updateUserDestination(ctx, user, destinationID); err != nil {
-		return fmt.Errorf("failed to update user destination in DB: %w", err)
+		return fmt.Errorf("failed to update user destination in DB; %w", err)
 	}
 
+	return nil
+}
+
+// DisableDestination disables a notification destination endpoint by updating its status to DISABLED.
+// https://developer.ebay.com/api-docs/commerce/notification/resources/destination/methods/updateDestination
+func (c *Client) DisableDestination(
+	ctx context.Context,
+	destinationID string,
+	endpoint string,
+	verificationToken string,
+) error {
+	token, err := c.Auth.GetApplicationToken(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get application token; %w", err)
+	}
+
+	reqBody := map[string]interface{}{
+		"status": "DISABLED",
+		"deliveryConfig": map[string]interface{}{
+			"endpoint":          endpoint,
+			"verificationToken": verificationToken,
+		},
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request body; %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodPut,
+		c.NotificationURL+notificationAPI+"destination/"+destinationID,
+		bytes.NewReader(bodyBytes),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create request; %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to execute request; %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("notification API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	slog.Info("disabled notification destination", "destinationId", destinationID)
 	return nil
 }
 
@@ -229,14 +282,14 @@ func (c *Client) DeleteDestination(ctx context.Context, destinationID string) er
 		nil,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return fmt.Errorf("failed to create request; %w", err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := c.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to execute request: %w", err)
+		return fmt.Errorf("failed to execute request; %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -317,7 +370,7 @@ func (c *Client) GetDestinations(ctx context.Context, pageSize int) (*Destinatio
 		nil,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create request; %w", err)
 	}
 
 	q := req.URL.Query()
@@ -329,7 +382,7 @@ func (c *Client) GetDestinations(ctx context.Context, pageSize int) (*Destinatio
 
 	resp, err := c.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute request: %w", err)
+		return nil, fmt.Errorf("failed to execute request; %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -340,7 +393,7 @@ func (c *Client) GetDestinations(ctx context.Context, pageSize int) (*Destinatio
 
 	var destResp DestinationsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&destResp); err != nil {
-		return nil, fmt.Errorf("failed to parse destinations response: %w", err)
+		return nil, fmt.Errorf("failed to parse destinations response; %w", err)
 	}
 
 	return &destResp, nil
@@ -363,7 +416,7 @@ func (c *Client) CreateUserSubscription(
 
 	destinationID, err := c.GetUserDestinationID(ctx, user)
 	if err != nil || destinationID == "" {
-		return "", fmt.Errorf("failed to get destination ID for user %s: %w", user, err)
+		return "", fmt.Errorf("failed to get destination ID for user %s; %w", user, err)
 	}
 
 	type payload struct {
@@ -392,7 +445,7 @@ func (c *Client) CreateUserSubscription(
 
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal request body: %w", err)
+		return "", fmt.Errorf("failed to marshal request body; %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(
@@ -401,7 +454,7 @@ func (c *Client) CreateUserSubscription(
 		bytes.NewReader(bodyBytes),
 	)
 	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
+		return "", fmt.Errorf("failed to create request; %w", err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -409,7 +462,7 @@ func (c *Client) CreateUserSubscription(
 
 	resp, err := c.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to execute request: %w", err)
+		return "", fmt.Errorf("failed to execute request; %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -448,7 +501,7 @@ func (c *Client) GetUserSubscriptions(ctx context.Context) ([]SubscriptionRespon
 		nil,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create request; %w", err)
 	}
 
 	// Set required headers
@@ -458,7 +511,7 @@ func (c *Client) GetUserSubscriptions(ctx context.Context) ([]SubscriptionRespon
 	// Execute the request
 	resp, err := c.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to execute request: %w", err)
+		return nil, fmt.Errorf("failed to execute request; %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -471,10 +524,58 @@ func (c *Client) GetUserSubscriptions(ctx context.Context) ([]SubscriptionRespon
 		Subscriptions []SubscriptionResponse `json:"subscriptions"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&subsResp); err != nil {
-		return nil, fmt.Errorf("failed to parse subscriptions response: %w", err)
+		return nil, fmt.Errorf("failed to parse subscriptions response; %w", err)
 	}
 
 	return subsResp.Subscriptions, nil
+}
+
+// DeleteUserSubscription deletes a user subscription.
+func (c *Client) DeleteUserSubscription(ctx context.Context, subscriptionID string) error {
+	user := ctx.Value(auth.USER).(string)
+	token, err := c.Auth.GetToken(ctx, user)
+	if err != nil {
+		return fmt.Errorf("failed to get or refresh user token; %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodDelete,
+		c.NotificationURL+notificationAPI+"subscription/"+subscriptionID,
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create request; %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to execute request; %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("notification API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// DeleteAllUserSubscriptions deletes all subscriptions for a user.
+func (c *Client) DeleteAllUserSubscriptions(ctx context.Context) error {
+	subs, err := c.GetUserSubscriptions(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get user subscriptions; %w", err)
+	}
+
+	for _, sub := range subs {
+		if err := c.DeleteUserSubscription(ctx, sub.SubscriptionID); err != nil {
+			return fmt.Errorf("failed to delete subscription; %w", err)
+		}
+	}
+	return nil
 }
 
 // EnableUserSubscriptions enables all subscriptions for a user.
@@ -484,13 +585,13 @@ func (c *Client) EnableUserSubscriptions(ctx context.Context) ([]SubscriptionRes
 	// 1. Get all subscriptions
 	subs, err := c.GetUserSubscriptions(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get user subscriptions: %w", err)
+		return nil, fmt.Errorf("failed to get user subscriptions; %w", err)
 	}
 
 	// 2. Get User-level auth token for the enable calls
 	token, err := c.Auth.GetToken(ctx, ctx.Value(auth.USER).(string))
 	if err != nil {
-		return nil, fmt.Errorf("failed to get user token: %w", err)
+		return nil, fmt.Errorf("failed to get user token; %w", err)
 	}
 
 	// 3. Enable each subscription
@@ -503,14 +604,14 @@ func (c *Client) EnableUserSubscriptions(ctx context.Context) ([]SubscriptionRes
 			nil,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create enable request for subscription %s: %w", sub.SubscriptionID, err)
+			return nil, fmt.Errorf("failed to create enable request for subscription %s; %w", sub.SubscriptionID, err)
 		}
 
 		req.Header.Set("Authorization", "Bearer "+token)
 
 		resp, err := c.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("failed to enable subscription %s: %w", sub.SubscriptionID, err)
+			return nil, fmt.Errorf("failed to enable subscription %s; %w", sub.SubscriptionID, err)
 		}
 
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
@@ -522,4 +623,39 @@ func (c *Client) EnableUserSubscriptions(ctx context.Context) ([]SubscriptionRes
 	}
 
 	return subs, nil
+}
+
+// TestUserSubscription triggers a test notification payload for a given subscription.
+// https://developer.ebay.com/api-docs/commerce/notification/resources/subscription/methods/testSubscription
+func (c *Client) TestUserSubscription(ctx context.Context, subscriptionID string) error {
+	user := ctx.Value(auth.USER).(string)
+	token, err := c.Auth.GetToken(ctx, user)
+	if err != nil {
+		return fmt.Errorf("failed to get or refresh user token: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodPost,
+		c.NotificationURL+notificationAPI+"subscription/"+subscriptionID+"/test",
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to execute request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("notification API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
 }

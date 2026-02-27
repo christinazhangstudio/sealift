@@ -92,7 +92,7 @@ func (c *Client) GetTransactionSummary(
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		return nil, fmt.Errorf("failed to read response body; %w", err)
 	}
 
 	// return empty resp
@@ -104,7 +104,7 @@ func (c *Client) GetTransactionSummary(
 		var errResp ErrorResponse
 		if err := json.Unmarshal(body, &errResp); err != nil {
 			return nil, fmt.Errorf(
-				"failed to unmarshal error response with status %d: %w; body %s",
+				"failed to unmarshal error response with status %d; %w; body %s",
 				resp.StatusCode,
 				err,
 				string(body),
@@ -126,7 +126,7 @@ func (c *Client) GetTransactionSummary(
 
 	var summary TransactionSummaryResponse
 	if err := json.Unmarshal(body, &summary); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal success response: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal success response; %w", err)
 	}
 
 	return &summary, nil
@@ -186,7 +186,7 @@ func (c *Client) GetPayouts(
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		return nil, fmt.Errorf("failed to read response body; %w", err)
 	}
 
 	// return empty resp
@@ -198,7 +198,7 @@ func (c *Client) GetPayouts(
 		var errResp ErrorResponse
 		if err := json.Unmarshal(body, &errResp); err != nil {
 			return nil, fmt.Errorf(
-				"failed to unmarshal error response with status %d: %w; body %s",
+				"failed to unmarshal error response with status %d; %w; body %s",
 				resp.StatusCode,
 				err,
 				string(body),
@@ -220,7 +220,7 @@ func (c *Client) GetPayouts(
 
 	var payouts PayoutsResponse
 	if err := json.Unmarshal(body, &payouts); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal success response: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal success response; %w", err)
 	}
 
 	return &payouts, nil

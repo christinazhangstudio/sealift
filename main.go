@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.tesla.com/chrzhang/sealift/api"
@@ -42,6 +43,9 @@ var (
 	frontendURL         = os.Getenv("FRONTEND_URL")
 	port                = os.Getenv("PORT")
 	jwtSecret           = os.Getenv("JWT_SECRET")
+
+	webhookInbox = make(map[string][]map[string]interface{})
+	inboxMutex   sync.Mutex
 )
 
 // ChallengeResponse for the verification response.
@@ -273,9 +277,24 @@ func main() {
 			return
 		}
 
+		// Delete user subscriptions first
+		ctxWithUser := context.WithValue(ctx, auth.USER, user)
+		if err := client.DeleteAllUserSubscriptions(ctxWithUser); err != nil {
+			slog.Error("failed to delete all user subscriptions", "err", err, "user", user)
+		} else {
+			slog.Info("deleted all user subscriptions", "user", user)
+		}
+
 		// Delete destination if it exists
 		if userDoc.DestinationID != "" {
 			slog.Info("deleting notification destination", "user", user, "destinationId", userDoc.DestinationID)
+
+			// Disable destination first before deleting
+			destinationURL := fmt.Sprintf("%s/%s", endpointURL, user)
+			if err := client.DisableDestination(ctx, userDoc.DestinationID, destinationURL, verificationToken); err != nil {
+				slog.Error("failed to disable notification destination", "err", err, "user", user)
+			}
+
 			// Attempt to delete destination, but don't block user deletion on failure
 			if err := client.DeleteDestination(ctx, userDoc.DestinationID); err != nil {
 				slog.Error("failed to delete notification destination", "err", err, "user", user)
@@ -729,7 +748,9 @@ func main() {
 
 	// Delete ALL notification destinations
 	// Likely only used during development and troubleshooting.
-	mux.HandleFunc("DELETE /api/notification/destinations/unused", func(w http.ResponseWriter, r *http.Request) {
+	// In order to DELETE subscriptions, go through the auth flow, since subscriptions
+	// are user-based, and destinations are app-level.
+	mux.HandleFunc("DELETE /api/notification/destinations/allusers", func(w http.ResponseWriter, r *http.Request) {
 		slog.Info("received request to delete unused destinations")
 		// Get all destinations
 		// Use a large limit to hopefully get all of them.
@@ -748,6 +769,11 @@ func main() {
 			// EXCEPT for the one used for the app's webhooks
 			// (which won't have a user associated to its name field)
 			if d.Name != "" {
+				// Disable destination first before deleting
+				if err := client.DisableDestination(ctx, d.DestinationID, d.DeliveryConfig.Endpoint, verificationToken); err != nil {
+					slog.Error("failed to disable destination", "destinationId", d.DestinationID, "err", err)
+				}
+
 				if err := client.DeleteDestination(ctx, d.DestinationID); err != nil {
 					slog.Error("failed to delete destination", "destinationId", d.DestinationID, "err", err)
 					errCount++
@@ -767,7 +793,7 @@ func main() {
 	})
 
 	// Create a notification subscription for a seller
-	mux.HandleFunc("POST /api/notification/users/{user}/subscription", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/notification/users/{user}/subscriptions", func(w http.ResponseWriter, r *http.Request) {
 		user := r.PathValue("user")
 		if user == "" {
 			http.Error(w, "user not specified", http.StatusBadRequest)
@@ -848,34 +874,29 @@ func main() {
 		json.NewEncoder(w).Encode(api.NotificationSubscriptions{Subscriptions: subs})
 	})
 
-	// // Disable a subscription for a seller
-	// mux.HandleFunc("POST /api/notification/{user}/subscription/{subscriptionId}/disable", func(w http.ResponseWriter, r *http.Request) {
-	// 	user := r.PathValue("user")
-	// 	subscriptionID := r.PathValue("subscriptionId")
-	// 	if user == "" || subscriptionID == "" {
-	// 		http.Error(w, "user and subscription ID required", http.StatusBadRequest)
-	// 		return
-	// 	}
+	// Test a subscription for a seller
+	mux.HandleFunc("POST /api/notification/users/{user}/subscriptions/{subscriptionId}/test", func(w http.ResponseWriter, r *http.Request) {
+		user := r.PathValue("user")
+		subscriptionID := r.PathValue("subscriptionId")
+		if user == "" || subscriptionID == "" {
+			http.Error(w, "user and subscription ID required", http.StatusBadRequest)
+			return
+		}
 
-	// 	slog.Info("received request to disable subscription", "user", user, "subscriptionId", subscriptionID)
+		slog.Info("received request to test subscription", "user", user, "subscriptionId", subscriptionID)
 
-	// 	token, err := client.Auth.GetToken(ctx, user)
-	// 	if err != nil {
-	// 		slog.Error("failed to get user token", "err", err, "user", user)
-	// 		http.Error(w, "user not authenticated", http.StatusUnauthorized)
-	// 		return
-	// 	}
+		ctx = context.WithValue(ctx, auth.USER, user)
+		err := client.TestUserSubscription(ctx, subscriptionID)
+		if err != nil {
+			slog.Error("failed to test subscription", "err", err, "user", user)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 
-	// 	notificationClient.AccessToken = token
-	// 	err = notificationClient.DisableSubscription(ctx, subscriptionID)
-	// 	if err != nil {
-	// 		slog.Error("failed to disable subscription", "err", err, "user", user)
-	// 		http.Error(w, err.Error(), http.StatusInternalServerError)
-	// 		return
-	// 	}
+		slog.Info("triggered test payload for subscription", "subscriptionId", subscriptionID, "user", user)
 
-	// 	w.WriteHeader(http.StatusNoContent)
-	// })
+		w.WriteHeader(http.StatusNoContent)
+	})
 
 	go func() {
 		slog.Debug("starting server", "port", port)
@@ -937,9 +958,21 @@ func notificationHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		// handle verification challenge
+		// eBay needs to verify that the user owns/has access to the provided endpoint URL.
+		// this is needed for the deletion and notification webhooks.
 		challengeCode := r.URL.Query().Get("challenge_code")
 		if challengeCode == "" {
-			http.Error(w, "missing challenge code", http.StatusBadRequest)
+			// If no challenge code, just return the recent webhooks for this user (Inbox behavior)
+			inboxMutex.Lock()
+			userWebhooks := webhookInbox[user]
+			inboxMutex.Unlock()
+
+			w.Header().Set("Content-Type", "application/json")
+			if userWebhooks == nil {
+				json.NewEncoder(w).Encode([]interface{}{})
+				return
+			}
+			json.NewEncoder(w).Encode(userWebhooks)
 			return
 		}
 
@@ -966,6 +999,18 @@ func notificationHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		slog.Info("received notification for seller", "user", user, "notif", notif)
+
+		// Save payload in memory for inspection
+		inboxMutex.Lock()
+		if webhookInbox == nil {
+			webhookInbox = make(map[string][]map[string]interface{})
+		}
+		webhookInbox[user] = append([]map[string]interface{}{notif}, webhookInbox[user]...)
+		if len(webhookInbox[user]) > 50 {
+			webhookInbox[user] = webhookInbox[user][:50]
+		}
+		inboxMutex.Unlock()
+
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "OK")
 

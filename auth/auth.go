@@ -115,7 +115,7 @@ func (c *Client) AuthUser(ctx context.Context, authCode string) (string, error) 
 
 	loc, err := time.LoadLocation(timezone)
 	if err != nil {
-		return "", fmt.Errorf("failed to load timezone: %w", err)
+		return "", fmt.Errorf("failed to load timezone; %w", err)
 	}
 
 	expiresAt := time.Now().In(loc).Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
@@ -303,7 +303,7 @@ func (c *Client) GetToken(ctx context.Context, user string) (string, error) {
 
 	loc, err := time.LoadLocation(timezone)
 	if err != nil {
-		return "", fmt.Errorf("failed to load timezone: %w", err)
+		return "", fmt.Errorf("failed to load timezone; %w", err)
 	}
 
 	expiresAt := token.ExpiresAt.In(loc)
