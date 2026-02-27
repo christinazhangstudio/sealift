@@ -181,7 +181,7 @@ func (c *Client) GetAccount(
 
 	xmlData, err := xml.MarshalIndent(request, "", "  ")
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal XML: %w", err)
+		return nil, fmt.Errorf("failed to marshal XML; %w", err)
 	}
 	xmlBody := []byte(`<?xml version="1.0" encoding="utf-8"?>` + string(xmlData))
 
@@ -213,13 +213,13 @@ func (c *Client) GetAccount(
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		return nil, fmt.Errorf("failed to read response body; %w", err)
 	}
 
 	var accountResp AccountResponse
 	if err := xml.Unmarshal(body, &accountResp); err != nil {
 		return nil, fmt.Errorf(
-			"failed to unmarshal error response with status %d: %w; body %s",
+			"failed to unmarshal error response with status %d; %w; body %s",
 			resp.StatusCode,
 			err,
 			string(body),
