@@ -11,13 +11,13 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.tesla.com/chrzhang/sealift/api"
 	"github.tesla.com/chrzhang/sealift/auth"
 	"github.tesla.com/chrzhang/sealift/ebay"
 	"github.tesla.com/chrzhang/sealift/html"
+	"github.tesla.com/chrzhang/sealift/inbox"
 	"github.tesla.com/chrzhang/sealift/notes"
 
 	"github.com/rs/cors"
@@ -43,9 +43,6 @@ var (
 	frontendURL         = os.Getenv("FRONTEND_URL")
 	port                = os.Getenv("PORT")
 	jwtSecret           = os.Getenv("JWT_SECRET")
-
-	webhookInbox = make(map[string][]map[string]interface{})
-	inboxMutex   sync.Mutex
 )
 
 // ChallengeResponse for the verification response.
@@ -91,6 +88,12 @@ func main() {
 
 	mongoDB := db.Database("sealift")
 	mongoUsersCollection := mongoDB.Collection("users")
+	mongoInboxCollection := mongoDB.Collection("inbox")
+
+	inboxReceiver := &inbox.Receiver{
+		DB: mongoInboxCollection,
+	}
+	inboxReceiver.Init()
 
 	// reused for now
 	// keep in mind will only reuse connections when the resp body has been fully read and closed!
@@ -131,52 +134,7 @@ func main() {
 	mux.HandleFunc("/sealift-webhook", deletionNotificationHandler)
 
 	// webhook for seller-specific notifications
-	mux.HandleFunc("/sealift-webhook/{user}", notificationHandler)
-
-	// // JWT-based login with CSRF middleware
-	// mux.HandleFunc("GET /api/auth/login", func(w http.ResponseWriter, r *http.Request) {
-	// 	slog.Info("received request to login", "part", r.URL.Path)
-
-	// 	// this is ok with https
-	// 	var creds struct {
-	// 		Username string `json:"username"`
-	// 		Password string `json:"password"`
-	// 	}
-	// 	err := json.NewDecoder(r.Body).Decode(&creds)
-	// 	if err != nil {
-	// 		slog.Error(
-	// 			"failed to auth user; invalid creds",
-	// 			"err", err,
-	// 		)
-	// 		http.Error(w, "failed to auth user; invalid creds", http.StatusBadRequest)
-	// 		return
-	// 	}
-
-	// 	if creds.Username == "" || creds.Password == "" {
-	// 		http.Error(w, "username and password not supplied", http.StatusBadRequest)
-	// 		return
-	// 	}
-
-	// 	mongoCollection := mongoDB.Collection("")
-
-	// 	filter := bson.D{{Key: "user", Value: creds.Username}}
-	// 	var token UserTokenDocument
-	// 	err = .FindOne(ctx, filter).Decode(&token)
-	// 	if err == mongo.ErrNoDocuments {
-	// 		http.Error(w, "invalid user credentials", http.StatusUnauthorized)
-	// 		return
-	// 	}
-
-	// 	if err != nil {
-	// 		http.Error("failed to find token for user; %w", err)
-	// 	}
-
-	// 	// JWTs are signed with a secret key; storing
-	// 	// it in FE (client-side code/env vars/etc)
-	// 	// exposes it to attackers via XSS and browser dev tools
-	// 	// (via localStorage and non-HTTP-only cookies).
-
-	// })
+	mux.HandleFunc("/sealift-webhook/{user}", notificationHandler(inboxReceiver))
 
 	// user auth and consent page
 	// auth-accepted URL is auth-callback
@@ -898,6 +856,66 @@ func main() {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	// trash a specific notification
+	mux.HandleFunc("PUT /api/inbox/{user}/{notificationId}/trash", func(w http.ResponseWriter, r *http.Request) {
+		user := r.PathValue("user")
+		notificationID := r.PathValue("notificationId")
+		if user == "" || notificationID == "" {
+			http.Error(w, "missing user or notification id", http.StatusBadRequest)
+			return
+		}
+
+		slog.Info("trashing notification", "user", user, "notificationId", notificationID)
+		if err := inboxReceiver.TrashNotification(ctx, user, notificationID); err != nil {
+			slog.Error("failed to trash notification", "err", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "OK")
+	})
+
+	// mark a specific notification as read in the inbox
+	mux.HandleFunc("PUT /api/inbox/{user}/{notificationId}/mark_read", func(w http.ResponseWriter, r *http.Request) {
+		user := r.PathValue("user")
+		notificationID := r.PathValue("notificationId")
+		if user == "" || notificationID == "" {
+			http.Error(w, "missing user or notification id", http.StatusBadRequest)
+			return
+		}
+
+		slog.Info("marking notification as read", "user", user, "notificationId", notificationID)
+		if err := inboxReceiver.ReadNotification(ctx, user, notificationID); err != nil {
+			slog.Error("failed to mark notification as read", "err", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "OK")
+	})
+
+	// permanently delete a specific notification from trash
+	mux.HandleFunc("DELETE /api/inbox/{user}/{notificationId}/trash", func(w http.ResponseWriter, r *http.Request) {
+		user := r.PathValue("user")
+		notificationID := r.PathValue("notificationId")
+		if user == "" || notificationID == "" {
+			http.Error(w, "missing user or notification id", http.StatusBadRequest)
+			return
+		}
+
+		slog.Info("permanently deleting notification", "user", user, "notificationId", notificationID)
+		if err := inboxReceiver.DeletePermanent(ctx, user, notificationID); err != nil {
+			slog.Error("failed to permanently delete notification", "err", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "OK")
+	})
+
 	go func() {
 		slog.Debug("starting server", "port", port)
 		err = s.ListenAndServe()
@@ -948,74 +966,130 @@ func newDB(ctx context.Context) (*mongo.Client, error) {
 	return db, err
 }
 
-func notificationHandler(w http.ResponseWriter, r *http.Request) {
-	user := r.PathValue("user")
-	if user == "" {
-		http.Error(w, "user not specified", http.StatusBadRequest)
-		return
-	}
+func notificationHandler(inbox *inbox.Receiver) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := r.PathValue("user")
+		if user == "" {
+			http.Error(w, "user not specified", http.StatusBadRequest)
+			return
+		}
 
-	switch r.Method {
-	case http.MethodGet:
-		// handle verification challenge
-		// eBay needs to verify that the user owns/has access to the provided endpoint URL.
-		// this is needed for the deletion and notification webhooks.
-		challengeCode := r.URL.Query().Get("challenge_code")
-		if challengeCode == "" {
-			// If no challenge code, just return the recent webhooks for this user (Inbox behavior)
-			inboxMutex.Lock()
-			userWebhooks := webhookInbox[user]
-			inboxMutex.Unlock()
+		switch r.Method {
+		case http.MethodGet:
+			// handle verification challenge or SSE connection
+			challengeCode := r.URL.Query().Get("challenge_code")
+			if challengeCode == "" {
+				// check if this is an SSE connection request
+				if r.Header.Get("Accept") == "text/event-stream" {
+					// headers for Server-Sent Events
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.Header().Set("Cache-Control", "no-cache")
+					w.Header().Set("Connection", "keep-alive")
+					w.Header().Set("Access-Control-Allow-Origin", "*")
 
-			w.Header().Set("Content-Type", "application/json")
-			if userWebhooks == nil {
-				json.NewEncoder(w).Encode([]interface{}{})
+					// buffer channel for this specific connection
+					// for 100 messages so that no messages are lost
+					// if the browser is not reading SSE events fast enough
+					// (also not unbuffered because the code on the rcv e.g. Marshal
+					// can cause dropped messages if they arrive very closely together)
+					connChan := make(chan map[string]interface{}, 100)
+
+					// add this connection channel, specific to the user
+					inbox.AddClient(user, connChan)
+
+					// cleanup when the connection is closed
+					defer func() {
+						inbox.RemoveClient(user, connChan)
+						close(connChan)
+					}()
+
+					// send initial payload (for historical messages)
+					userWebhooks, err := inbox.GetPastNotifications(r.Context(), user)
+					if err != nil {
+						slog.Error("failed to get initial webhooks from db", "err", err, "user", user)
+					}
+
+					if len(userWebhooks) > 0 {
+						data, _ := json.Marshal(userWebhooks)
+						fmt.Fprintf(w, "event: initial\ndata: %s\n\n", data)
+						w.(http.Flusher).Flush() // actually write
+					}
+
+					// listen for new messages and push them
+					for {
+						select {
+						case msg := <-connChan:
+							data, err := json.Marshal(msg)
+							if err != nil {
+								slog.Error("failed to marshal message", "err", err)
+								continue
+							}
+							fmt.Fprintf(w, "event: message\ndata: %s\n\n", data)
+							w.(http.Flusher).Flush() // actually write
+						case <-r.Context().Done():
+							return // client disconnected
+						}
+					}
+				}
+
+				// if no challenge code and not SSE, just return the recent webhooks for this user
+				userWebhooks, err := inbox.GetPastNotifications(r.Context(), user)
+				if err != nil {
+					http.Error(w, "error pulling webhooks from data store", http.StatusInternalServerError)
+					return
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+				if userWebhooks == nil {
+					json.NewEncoder(w).Encode([]interface{}{})
+					return
+				}
+				json.NewEncoder(w).Encode(userWebhooks)
 				return
 			}
-			json.NewEncoder(w).Encode(userWebhooks)
-			return
+
+			// compute hash for challenge code + verification token + endpoint URL (make sure to use the right URL)
+			hashInput := challengeCode + verificationToken + endpointURL + "/" + user
+			hash := sha256.Sum256([]byte(hashInput))
+			hashString := fmt.Sprintf("%x", hash)
+
+			slog.Info("computed hash for challenge code", "url", endpointURL+"/"+user, "user", user)
+
+			resp := ChallengeResponse{ChallengeResponse: hashString}
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(resp); err != nil {
+				http.Error(w, "invalid challenge resp", http.StatusBadRequest)
+				return
+			}
+
+		case http.MethodPost:
+			// handle notification for specific seller
+			var notif map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&notif); err != nil {
+				http.Error(w, "invalid json", http.StatusBadRequest)
+				return
+			}
+
+			var payload ebay.NotificationPayload
+			if notifBytes, err := json.Marshal(notif); err == nil {
+				json.Unmarshal(notifBytes, &payload)
+			}
+
+			slog.Info("received notification for seller", "user", user, "eventDate", payload.Notification.EventDate, "sender", payload.Notification.Data.SenderUserName)
+
+			err := inbox.PushNotification(r.Context(), user, notif)
+			if err != nil {
+				slog.Error("failed to store and broadcast notification", "err", err)
+				// allow the platform to know that we received the message,
+				// even if it was hasn't handled correctly by the receiver
+			}
+
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "OK")
+
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
-
-		// compute hash for challenge code + verification token + endpoint URL (make sure to use the right URL)
-		hashInput := challengeCode + verificationToken + endpointURL + "/" + user
-		hash := sha256.Sum256([]byte(hashInput))
-		hashString := fmt.Sprintf("%x", hash)
-
-		slog.Info("computed hash for challenge code", "url", endpointURL+"/"+user, "user", user)
-
-		resp := ChallengeResponse{ChallengeResponse: hashString}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			http.Error(w, "invalid challenge resp", http.StatusBadRequest)
-			return
-		}
-
-	case http.MethodPost:
-		// handle notification for specific seller
-		var notif map[string]interface{}
-		if err := json.NewDecoder(r.Body).Decode(&notif); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
-			return
-		}
-
-		slog.Info("received notification for seller", "user", user, "notif", notif)
-
-		// Save payload in memory for inspection
-		inboxMutex.Lock()
-		if webhookInbox == nil {
-			webhookInbox = make(map[string][]map[string]interface{})
-		}
-		webhookInbox[user] = append([]map[string]interface{}{notif}, webhookInbox[user]...)
-		if len(webhookInbox[user]) > 50 {
-			webhookInbox[user] = webhookInbox[user][:50]
-		}
-		inboxMutex.Unlock()
-
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "OK")
-
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
