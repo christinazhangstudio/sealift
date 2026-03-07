@@ -61,6 +61,25 @@ type SubscriptionResponse struct {
 	FilterID       string `json:"filterId,omitempty"`
 }
 
+type NotificationPayload struct {
+	Metadata struct {
+		Topic         string `json:"topic"`
+		SchemaVersion string `json:"schemaVersion"`
+		Deprecated    bool   `json:"deprecated"`
+	} `json:"metadata"`
+	Notification struct {
+		NotificationID string `json:"notificationId"`
+		EventDate      string `json:"eventDate"`
+		PublishDate    string `json:"publishDate"`
+		PublishAttempt int    `json:"publishAttempt"`
+		Data           struct {
+			SenderUserName string `json:"senderUserName"`
+			MessageBody    string `json:"messageBody"`
+			Subject        string `json:"subject"`
+		} `json:"data"`
+	} `json:"notification"`
+}
+
 // GetTopic retrieves details for a specified notification topic.
 // topicID is the unique identifier of the notification topic (e.g., "MARKETPLACE_ACCOUNT_DELETION")
 // API docs: https://developer.ebay.com/api-docs/commerce/notification/resources/topic/methods/getTopic
@@ -652,7 +671,7 @@ func (c *Client) TestUserSubscription(ctx context.Context, subscriptionID string
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("notification API returned status %d: %s", resp.StatusCode, string(body))
 	}

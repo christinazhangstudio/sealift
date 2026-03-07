@@ -24,14 +24,14 @@ func GetNotes(
 	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	cursor, err := notesDB.Find(dbCtx, bson.M{})
+	result, err := notesDB.Find(dbCtx, bson.M{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to find notes; %w", err)
 	}
-	defer cursor.Close(dbCtx)
+	defer result.Close(dbCtx)
 
 	notes := make([]Note, 0)
-	if err = cursor.All(dbCtx, &notes); err != nil {
+	if err = result.All(dbCtx, &notes); err != nil {
 		return nil, fmt.Errorf("failed to decode notes; %w", err)
 	}
 

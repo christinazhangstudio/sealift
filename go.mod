@@ -4,6 +4,8 @@ go 1.24
 
 require go.mongodb.org/mongo-driver v1.17.3
 
+require github.com/gorilla/websocket v1.5.3 // indirect
+
 require (
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/klauspost/compress v1.16.7 // indirect
