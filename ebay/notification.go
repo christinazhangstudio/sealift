@@ -4,18 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"path"
 	"strconv"
-	"time"
 
 	"github.tesla.com/chrzhang/sealift/auth"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
 )
 
 const (
@@ -80,6 +76,12 @@ type NotificationPayload struct {
 	} `json:"notification"`
 }
 
+type PublicKeyResponse struct {
+	Algorithm string `json:"algorithm"`
+	Digest    string `json:"digest"`
+	Key       string `json:"key"`
+}
+
 // GetTopic retrieves details for a specified notification topic.
 // topicID is the unique identifier of the notification topic (e.g., "MARKETPLACE_ACCOUNT_DELETION")
 // API docs: https://developer.ebay.com/api-docs/commerce/notification/resources/topic/methods/getTopic
@@ -123,6 +125,46 @@ func (c *Client) GetTopic(ctx context.Context, topicID string) (*TopicResponse, 
 	return &topic, nil
 }
 
+// GetPublicKey retrieves the public key associated with a given public_key_id.
+// It is used to verify the signature of incoming webhook notifications.
+// API docs: https://developer.ebay.com/api-docs/commerce/notification/resources/public_key/methods/getPublicKey
+func (c *Client) GetPublicKey(ctx context.Context, publicKeyID string) (*PublicKeyResponse, error) {
+	token, err := c.Auth.GetApplicationToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get or refresh application token; %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodGet,
+		c.NotificationURL+notificationAPI+"public_key/"+publicKeyID,
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request; %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute request; %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("notification API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var pubKeyResp PublicKeyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&pubKeyResp); err != nil {
+		return nil, fmt.Errorf("failed to parse public key response; %w", err)
+	}
+
+	return &pubKeyResp, nil
+}
+
 // GetTopics retrieves details for all available notification topics.
 // API docs: https://developer.ebay.com/api-docs/commerce/notification/resources/topic/methods/getTopics
 func (c *Client) GetTopics(ctx context.Context) ([]TopicResponse, error) {
@@ -136,6 +178,10 @@ func (c *Client) GetTopics(ctx context.Context) ([]TopicResponse, error) {
 		c.NotificationURL+notificationAPI+"topic",
 		nil,
 	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request; %w", err)
+	}
+
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -171,10 +217,10 @@ func (c *Client) CreateDestination(
 	ctx context.Context,
 	endpoint string,
 	verificationToken string,
-) error {
+) (string, error) {
 	token, err := c.Auth.GetApplicationToken(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get application token; %w", err)
+		return "", fmt.Errorf("failed to get application token; %w", err)
 	}
 
 	reqBody := map[string]interface{}{
@@ -188,7 +234,7 @@ func (c *Client) CreateDestination(
 
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return fmt.Errorf("failed to marshal request body; %w", err)
+		return "", fmt.Errorf("failed to marshal request body; %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(
@@ -197,7 +243,7 @@ func (c *Client) CreateDestination(
 		bytes.NewReader(bodyBytes),
 	)
 	if err != nil {
-		return fmt.Errorf("failed to create request; %w", err)
+		return "", fmt.Errorf("failed to create request; %w", err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -205,32 +251,28 @@ func (c *Client) CreateDestination(
 
 	resp, err := c.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to execute request; %w", err)
+		return "", fmt.Errorf("failed to execute request; %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("notification API returned status %d: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("notification API returned status %d: %s", resp.StatusCode, string(body))
 	}
 
 	// only Location header is returned, no body
 	loc := resp.Header.Get("Location")
 	if loc == "" {
-		return fmt.Errorf("notification API returned no location header")
+		return "", fmt.Errorf("notification API returned no location header")
 	}
 
 	slog.Info("created notification destination", "loc", loc)
 
-	user := ctx.Value(auth.USER).(string)
 	// loc returned in the format:
 	// https://api.ebay.com/commerce/notification/v1/destination/{destinationId}
 	destinationID := path.Base(loc)
-	if err := c.updateUserDestination(ctx, user, destinationID); err != nil {
-		return fmt.Errorf("failed to update user destination in DB; %w", err)
-	}
 
-	return nil
+	return destinationID, nil
 }
 
 // DisableDestination disables a notification destination endpoint by updating its status to DISABLED.
@@ -320,53 +362,6 @@ func (c *Client) DeleteDestination(ctx context.Context, destinationID string) er
 	return nil
 }
 
-func (c *Client) updateUserDestination(
-	ctx context.Context,
-	user string,
-	destinationID string,
-) error {
-	filter := bson.D{{Key: "user", Value: user}}
-	update := bson.M{
-		"$set": bson.M{
-			"destination_id": destinationID,
-		},
-	}
-
-	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	result, err := c.DB.UpdateOne(dbCtx, filter, update)
-	if err != nil {
-		return fmt.Errorf("failed to update user destination; %w", err)
-	}
-
-	if result.MatchedCount == 0 {
-		return errors.New("user somehow does not exist after auth flow")
-	}
-
-	return nil
-}
-
-func (c *Client) GetUserDestinationID(ctx context.Context, user string) (string, error) {
-	filter := bson.D{{Key: "user", Value: user}}
-	var result struct {
-		DestinationID string `bson:"destination_id"`
-	}
-
-	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	err := c.DB.FindOne(dbCtx, filter).Decode(&result)
-	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			return "", nil
-		}
-		return "", fmt.Errorf("failed to get user destination; %w", err)
-	}
-
-	return result.DestinationID, nil
-}
-
 type DestinationsResponse struct {
 	Destinations []Destination `json:"destinations"`
 	Href         string        `json:"href"`
@@ -424,18 +419,18 @@ func (c *Client) GetDestinations(ctx context.Context, pageSize int) (*Destinatio
 func (c *Client) CreateUserSubscription(
 	ctx context.Context,
 	topicID string,
+	destinationID string,
 ) (string, error) {
 	// Use Application token for Application-level notifications,
 	// and User token for User-level notifications.
 	user := ctx.Value(auth.USER).(string)
+	if destinationID == "" {
+		return "", fmt.Errorf("destination ID is required for user subscription")
+	}
+
 	token, err := c.Auth.GetToken(ctx, user)
 	if err != nil {
 		return "", fmt.Errorf("failed to get or refresh user token; %w", err)
-	}
-
-	destinationID, err := c.GetUserDestinationID(ctx, user)
-	if err != nil || destinationID == "" {
-		return "", fmt.Errorf("failed to get destination ID for user %s; %w", user, err)
 	}
 
 	type payload struct {
@@ -496,7 +491,7 @@ func (c *Client) CreateUserSubscription(
 		return "", fmt.Errorf("notification API returned no location header")
 	}
 
-	slog.Info("created notification destination", "loc", loc)
+	slog.Info("created notification subscription", "loc", loc)
 
 	// loc returned in the format:
 	// https://api.ebay.com/commerce/notification/v1/subscription/{subscriptionId}

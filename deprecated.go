@@ -40,7 +40,7 @@ func deprecated() {
 			pageIdx = 0
 		}
 
-		users, err := client.Auth.GetUsers(ctx)
+		users, err := client.Auth.GetUsers(ctx, "")
 		if err != nil {
 			slog.Error(
 				"failed to get registered users",
@@ -129,7 +129,7 @@ func deprecated() {
 			"startTo", startTo,
 		)
 
-		users, err := client.Auth.GetUsers(ctx)
+		users, err := client.Auth.GetUsers(ctx, "")
 		if err != nil {
 			slog.Error(
 				"failed to get registered users",
