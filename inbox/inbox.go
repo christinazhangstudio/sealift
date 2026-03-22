@@ -45,7 +45,7 @@ import (
 // 	}
 // }
 
-// inbox Receiver that receives notifications from platform POSTs to destination webhooks.
+// Receiver receives notifications from platform POSTs to destination webhooks.
 type Receiver struct {
 	DB *mongo.Collection
 	streamer
@@ -56,7 +56,7 @@ type streamer struct {
 	connMutex sync.Mutex
 }
 
-// Init sets up the internal channel mapping so it's ready for broadcast routing.
+// Init sets up chan map (streamer conns) to prepare for broadcast routing.
 func (s *streamer) Init() {
 	s.conns = make(map[string][]chan map[string]interface{})
 }

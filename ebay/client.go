@@ -1,23 +1,21 @@
 package ebay
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"encoding/xml"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.tesla.com/chrzhang/sealift/auth"
-	"go.mongodb.org/mongo-driver/mongo"
 )
 
 // Client interacts with eBay APIs.
 type Client struct {
 	// Client is the HTTP client that makes requests to eBay APIs.
 	*http.Client
-
-	// DB client
-	// would be a singleton (only bc there are no tests and this is thread safe :9)
-	// but cyclic dependency (and db pkg not needed)
-	DB *mongo.Collection
 
 	// URL specifies the APIz endpoint.
 	// https://apiz.ebay.com for prod
@@ -41,44 +39,100 @@ type Client struct {
 	Auth *auth.Client
 }
 
-// Takes an operation e.g. transaction_summary
-// as well as optional params e.g. filter=transactionStatus:{PAYOUT}
-// A list of APIs and their rate limits:
-// https://developer.ebay.com/develop/get-started/api-call-limits
-func (c *Client) request(
+// doJSON handles the full lifecycle of a REST JSON API request.
+// It creates the request, sets common headers, executes it, checks for errors, and unmarshals the response.
+func (c *Client) doJSON(
 	ctx context.Context,
-	api string,
-	op string,
-	params map[string]string,
-) (*http.Request, error) {
-	token, err := c.Auth.GetToken(ctx, ctx.Value(auth.USER).(string))
-	if err != nil {
-		return nil, fmt.Errorf("failed to get or refresh user token; %w", err)
+	method string,
+	url string,
+	token string,
+	reqBody interface{},
+	respBody interface{},
+) error {
+	var bodyReader io.Reader
+	if reqBody != nil {
+		bodyBytes, err := json.Marshal(reqBody)
+		if err != nil {
+			return fmt.Errorf("failed to marshal request body; %w", err)
+		}
+		bodyReader = bytes.NewReader(bodyBytes)
 	}
 
-	req, err := http.NewRequestWithContext(
-		ctx,
-		http.MethodGet,
-		c.URL+api+op,
-		nil,
-	)
+	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to make new request; %w", err)
+		return fmt.Errorf("failed to create request; %w", err)
 	}
-
-	q := req.URL.Query()
 
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
+	if method == http.MethodGet {
+		req.Header.Set("Accept", "application/json")
+	}
 
-	for k, v := range params {
-		if v != "" {
-			q.Set(k, v)
+	resp, err := c.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to execute request; %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("API failed with status %d: %s", resp.StatusCode, string(b))
+	}
+
+	if respBody != nil && resp.StatusCode != http.StatusNoContent {
+		if err := json.NewDecoder(resp.Body).Decode(respBody); err != nil {
+			return fmt.Errorf("failed to parse response; %w", err)
 		}
 	}
 
-	req.URL.RawQuery = q.Encode()
+	return nil
+}
 
-	return req, nil
+// doXML handles the full lifecycle of a legacy XML Trading API request.
+// It marshals the XML, sets required Trading API headers, executes it, and unmarshals the response.
+// Caller is responsible for verifying the Ack status in the response struct.
+func (c *Client) doXML(
+	ctx context.Context,
+	callName string,
+	compatLevel string,
+	token string,
+	reqBody interface{},
+	respBody interface{},
+) error {
+	xmlData, err := xml.MarshalIndent(reqBody, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal request XML; %w", err)
+	}
+	xmlPayload := []byte(`<?xml version="1.0" encoding="utf-8"?>` + string(xmlData))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.TradURL, bytes.NewBuffer(xmlPayload))
+	if err != nil {
+		return fmt.Errorf("failed to create request; %w", err)
+	}
+
+	req.Header.Set("Content-Type", "text/xml")
+	req.Header.Set("X-EBAY-API-COMPATIBILITY-LEVEL", compatLevel)
+	req.Header.Set("X-EBAY-API-CALL-NAME", callName)
+	req.Header.Set("X-EBAY-API-SITEID", "0") // US site
+	req.Header.Set("X-EBAY-API-DEV-NAME", c.Auth.DevID)
+	req.Header.Set("X-EBAY-API-APP-NAME", c.Auth.ClientID)
+	req.Header.Set("X-EBAY-API-CERT-NAME", c.Auth.ClientSecret)
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to execute request; %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body; %w", err)
+	}
+
+	if err := xml.Unmarshal(body, respBody); err != nil {
+		return fmt.Errorf("failed to unmarshal response XML (status %d): %w; body: %s", resp.StatusCode, err, string(body))
+	}
+
+	return nil
 }

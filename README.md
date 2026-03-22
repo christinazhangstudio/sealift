@@ -19,7 +19,7 @@ ngrok.exe http --host-header=rewrite http://localhost:443
 ```
 ngrok will show a HTML page with a browser warning by default.
 To circumvent this, can add `ngrok-skip-browser-warning` to a request header. Chrome extension [Requestly](https://requestly.com/) is the more automated way to do this:
-![requestly](./docs/img/requestly.png)
+![requestly](./img/requestly.png)
 
 ### docker
 
@@ -68,6 +68,8 @@ ERROR failed to create destination (non-fatal) err="notification API returned st
 just remember to set `ENDPOINT_URL`.
 
 ## notification endpoints
+there should only be 1 destinations for a specific tenant, and /destinations
+is respective to that tenant.
 
 ```
 curl -X GET "http://localhost:443/api/notification/destinations" --cookie "authjs.session-token=<token>" | jq .

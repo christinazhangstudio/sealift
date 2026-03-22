@@ -1,14 +1,11 @@
 package ebay
 
 import (
-	"bytes"
 	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"time"
 
 	"github.tesla.com/chrzhang/sealift/auth"
@@ -204,58 +201,18 @@ func (c *Client) GetSellerList(
 		GranularityLevel: "Coarse",
 	}
 	request.RequesterCredentials.EBayAuthToken = token
-	// maximum time range must be a value less than 120 days
 	request.StartTimeFrom = startFrom.Format(time.RFC3339)
 	request.StartTimeTo = startTo.Format(time.RFC3339)
 	request.Pagination.EntriesPerPage = pageSize
-	request.Pagination.PageNumber = pageIdx // API is 1 indexed
-
-	xmlData, err := xml.MarshalIndent(request, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal XML; %w", err)
-	}
-	xmlBody := []byte(`<?xml version="1.0" encoding="utf-8"?>` + string(xmlData))
-
-	req, err := http.NewRequestWithContext(
-		ctx,
-		"POST",
-		c.TradURL,
-		bytes.NewBuffer(xmlBody),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to make request; %w", err)
-	}
-
-	req.Header.Set("Content-Type", "text/xml")
-	req.Header.Set("X-EBAY-API-COMPATIBILITY-LEVEL", "967")
-	req.Header.Set("X-EBAY-API-CALL-NAME", "GetSellerList")
-	req.Header.Set("X-EBAY-API-SITEID", "0") // US site
-
-	resp, err := c.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to do request; %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body; %w", err)
-	}
+	request.Pagination.PageNumber = pageIdx
 
 	var sellerList SellerListResponse
-	if err := xml.Unmarshal(body, &sellerList); err != nil {
-		return nil, fmt.Errorf(
-			"failed to unmarshal error response with status %d; %w; body %s",
-			resp.StatusCode,
-			err,
-			string(body),
-		)
+	if err := c.doXML(ctx, "GetSellerList", "967", token, request, &sellerList); err != nil {
+		return nil, err
 	}
 
-	// check if the call was successful
 	if sellerList.Ack != "Success" {
 		return nil, ErrHasNoMoreItems
-		//return nil, fmt.Errorf("API failed with status %s", sellerList.Ack)
 	}
 
 	if sellerList.HasMoreItems {

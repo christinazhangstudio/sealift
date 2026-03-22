@@ -1,12 +1,9 @@
 package ebay
 
 import (
-	"bytes"
 	"context"
 	"encoding/xml"
 	"fmt"
-	"io"
-	"net/http"
 
 	"github.tesla.com/chrzhang/sealift/auth"
 )
@@ -177,53 +174,11 @@ func (c *Client) GetAccount(
 	}
 	request.RequesterCredentials.EBayAuthToken = token
 	request.Pagination.EntriesPerPage = pageSize
-	request.Pagination.PageNumber = pageIdx // API is 1 indexed
-
-	xmlData, err := xml.MarshalIndent(request, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal XML; %w", err)
-	}
-	xmlBody := []byte(`<?xml version="1.0" encoding="utf-8"?>` + string(xmlData))
-
-	req, err := http.NewRequestWithContext(
-		ctx,
-		"POST",
-		c.TradURL,
-		bytes.NewBuffer(xmlBody),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to make request; %w", err)
-	}
-
-	// lots of headers, needed as specified in
-	// https://developer.ebay.com/devzone/xml/docs/Concepts/MakingACall.html
-	req.Header.Set("Content-Type", "text/xml")
-	req.Header.Set("X-EBAY-API-COMPATIBILITY-LEVEL", "1207")
-	req.Header.Set("X-EBAY-API-CALL-NAME", "GetAccount")
-	req.Header.Set("X-EBAY-API-SITEID", "0")
-	req.Header.Set("X-EBAY-API-DEV-NAME", c.Auth.DevID)
-	req.Header.Set("X-EBAY-API-APP-NAME", c.Auth.ClientID)
-	req.Header.Set("X-EBAY-API-CERT-NAME", c.Auth.ClientSecret)
-
-	resp, err := c.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to do request; %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body; %w", err)
-	}
+	request.Pagination.PageNumber = pageIdx
 
 	var accountResp AccountResponse
-	if err := xml.Unmarshal(body, &accountResp); err != nil {
-		return nil, fmt.Errorf(
-			"failed to unmarshal error response with status %d; %w; body %s",
-			resp.StatusCode,
-			err,
-			string(body),
-		)
+	if err := c.doXML(ctx, "GetAccount", "1207", token, request, &accountResp); err != nil {
+		return nil, err
 	}
 
 	for _, err := range accountResp.Errors {
@@ -232,7 +187,6 @@ func (c *Client) GetAccount(
 		}
 	}
 
-	// check if the call was successful
 	if accountResp.Ack != "Success" {
 		return nil, fmt.Errorf("API failed with status %s", accountResp.Ack)
 	}

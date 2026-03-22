@@ -1,4 +1,6 @@
 cert/
 deploy/
+prompts/
+docs/
 run.ps1
 *omit.md
