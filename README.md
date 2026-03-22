@@ -1,5 +1,17 @@
 # SEALIFT
 
+## table of contents
+- [setup](#setup)
+  - [ngrok](#ngrok)
+  - [docker](#docker)
+  - [mongodb](#mongodb)
+- [notification endpoints](#notification-endpoints)
+- [💫✨ ai ✨💫](#ai)
+  - [request flow diagram](#request-flow-diagram)
+
+## setup
+
+### ngrok
 
 for any temporary testing at a web-exposed URL:
 ```
@@ -9,11 +21,15 @@ ngrok will show a HTML page with a browser warning by default.
 To circumvent this, can add `ngrok-skip-browser-warning` to a request header. Chrome extension [Requestly](https://requestly.com/) is the more automated way to do this:
 ![requestly](./docs/img/requestly.png)
 
+### docker
+
 ```
 docker build -t sealift:latest .
 docker tag sealift:latest czhang19/christina:sealift
 docker push czhang19/christina:sealift
 ```
+
+### mongodb
 
 ```
 net start MongoDB
@@ -79,7 +95,7 @@ curl -X POST http://localhost:443/api/ai/ingest
 ```
 
 to spare local CPU/RAM from heavy workloads, 
-sealift uses both *local*, computationally-inexpensive components (embeddings and fallback storage) and *cloud infra* (vector DBs and heavy generative AI models). 
+sealift uses both *local*, computationally-inexpensive components (embeddings and fallback storage) and *cloud infra* (vector DBs and heavy generative AI models (or *self-hosted*, see below)). 
 
 ## request flow diagram
 ```mermaid
@@ -89,13 +105,15 @@ sequenceDiagram
     participant Ollama as Local Ollama
     participant Atlas as MongoDB Atlas Cloud
     participant LocalDB as MongoDB Local Fallback
+    participant SelfHosted as Self-Hosted AI (Qwen2.5)
     participant Groq as Groq Cloud API
 
-    Frontend->>Backend: user asks question
+    Frontend->>Backend: user asks question (q + history)
     
     rect rgba(128,128,128,0.08)
         Note over Backend,Ollama: 1. Vectorization Layer
         Backend->>Ollama: generate embeddings (nomic-embed-text)
+        Note right of Backend: only embeds q, not history
         Ollama-->>Backend: return Float32 vector
     end
 
@@ -103,26 +121,32 @@ sequenceDiagram
         Note over Backend,LocalDB: 2. Documentation Retrieval (RAG)
         Backend->>Atlas: attempt $vectorSearch (Cloud)
         Atlas-->>Backend: return Near Neighbors
-        Backend->>Backend: filter matches (> X threshold)
+        Backend->>Backend: filter matches (> AI_SIMILARITY_THRESHOLD)
         
         alt 0 Cloud matches found
             Backend->>LocalDB: retrieve all local chunks
             LocalDB-->>Backend: return all chunks
-            Backend->>Backend: Calculate Cosine Similarities (> X threshold)
+            Backend->>Backend: calculate Cosine Similarities (> AI_SIMILARITY_THRESHOLD)
         end
     end
 
     rect rgba(128,128,128,0.08)
         Note over Backend,Groq: 3. Dynamic Prompting & Generation
         
-        alt 0 total matches found (e.g. "hello")
-            Backend->>Backend: isCasualChat = true (Load casual prompt)
-        else Found matches
-            Backend->>Backend: isCasualChat = false (Load RAG prompt + context list)
+        alt 0 matches AND no history
+            Backend->>Backend: isCasualChat = true (Load prompts/casual.txt)
+        else matches found OR has history
+            Backend->>Backend: isCasualChat = false (Load prompts/rag.txt)
+            Backend->>Backend: inject conversation history into LLM context
         end
 
-        Backend->>Groq: request generation (llama-3.1-8b-instant)
-        Groq-->>Backend: response
+        alt USE_SELF_HOSTED_AI=true
+            Backend->>SelfHosted: request generation (SELF_HOSTED_AI_MODEL)
+            SelfHosted-->>Backend: response
+        else Groq Cloud
+            Backend->>Groq: request generation (GROQ_AI_MODEL)
+            Groq-->>Backend: response
+        end
     end
 
     Backend-->>Frontend: return answer JSON
@@ -132,15 +156,16 @@ sequenceDiagram
 **1. Vectorization (local)**
 * **model:** `nomic-embed-text` (tiny (~200MB) and inherently stateless)
 
-when a query is submitted, the Go backend asks local Ollama daemon to turn the text strings into a mathematical vector list.
+when a query is submitted, the Go backend asks local Ollama to turn the text into a vector. importantly, only the new question (`q`) is embedded; conversation history is kept separate in order not to pollute vector similarity scores.
 
 **2. Storage & Fallback Retrieval (Cloud + local)**
 * **primary DB:** MongoDB Atlas (`$vectorSearch`)
 * **fallback DB:** Local MongoDB
 
-the Go backend compares the mathematical distance between the query vector and the documentation chunk vectors. to prevent hallucination, it filters out any chunks that have a similarity score less than the `AI_SIMILARITY_THRESHOLD` (e.g. 0.30), both locally and on Atlas. 
+the Go backend compares the mathematical distance between the query vector and the documentation chunk vectors. to prevent hallucination, it filters out any chunks that have a similarity score less than the `AI_SIMILARITY_THRESHOLD`, both locally and on Atlas. 
 
-**3. Decision & Generation (Cloud)**
-* **model:** `llama-3.1-8b-instant` (via Groq API)
+**3. Decision & Generation (self-hosted || Cloud)**
+* **self-hosted:** configurable via `USE_SELF_HOSTED_AI`, `SELF_HOSTED_AI_URL`, `SELF_HOSTED_AI_MODEL`
+* **cloud:** Groq API via `GROQ_AI_MODEL`
 
-if no results meet the similarity threshold (i.e. "hello"), the backend flags the conversation as `isCasualChat` so the model isn't confused by a lack of context. the backend bundles the strict context + prompt constraints and sends the payload as an OpenAI-compatible JSON to Groq's APIs.
+if no results meet the similarity threshold AND there is no conversation history, the backend flags the conversation as `isCasualChat` and loads `prompts/casual.txt`. otherwise, it loads `prompts/rag.txt` and injects both doc context and conversation history, letting the LLM itself decide relevance. prompt templates are mounted as files and can be edited without rebuilding the Docker image.
