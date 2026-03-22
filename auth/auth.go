@@ -59,22 +59,27 @@ type Client struct {
 	DevID string
 }
 
-// UserTokenDocument represents the user document in MongoDB.
 type UserTokenDocument struct {
 	User                 string    `bson:"user"`
+	SealiftUserId        string    `bson:"sealift_user_id"`
 	AccessToken          string    `bson:"access_token"`
 	RefreshToken         string    `bson:"refresh_token"`
 	ExpiresAt            time.Time `bson:"expires_at,omitempty"`
 	NotificationEndpoint string    `bson:"notification_endpoint,omitempty"`
 }
 
-// GetUsers returns all the users this app has registered.
-func (c *Client) GetUsers(ctx context.Context) ([]string, error) {
+// GetUsers returns the users registered for a specific Sealift client.
+func (c *Client) GetUsers(ctx context.Context, sealiftUserId string) ([]string, error) {
 	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
+	filter := bson.D{}
+	if sealiftUserId != "" {
+		filter = bson.D{{Key: "sealift_user_id", Value: sealiftUserId}}
+	}
+
 	var users []string
-	undec, err := c.DB.Distinct(dbCtx, "user", bson.D{})
+	undec, err := c.DB.Distinct(dbCtx, "user", filter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get users; %w", err)
 	}
@@ -94,7 +99,8 @@ func (c *Client) GetUsers(ctx context.Context) ([]string, error) {
 
 // AuthUser is the initial flow when a user consents through auth-callback.
 // Returns the authenticated user ID.
-func (c *Client) AuthUser(ctx context.Context, authCode string) (string, error) {
+func (c *Client) AuthUser(ctx context.Context, authCode string, sealiftUserId string) (string, error) {
+	slog.Info("AuthUser started", "sealiftUserId", sealiftUserId)
 	tokenResp, err := c.getUserToken(authCode)
 	if err != nil {
 		return "", fmt.Errorf("failed to get user token; %w", err)
@@ -105,13 +111,11 @@ func (c *Client) AuthUser(ctx context.Context, authCode string) (string, error) 
 		return "", fmt.Errorf("failed to get user; %w", err)
 	}
 
-	// c.Sellers.Lock()
-	// defer c.Sellers.Unlock()
-	// c.Sellers.tokens[user] = &token{
-	// 	accessToken:  tokenResp.AccessToken,
-	// 	refreshToken: tokenResp.RefreshToken,
-	// 	expiresAt:    time.Now().In(loc).Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
-	// }
+	if user == "" {
+		return "", errors.New("retrieved empty username from eBay identity API")
+	}
+
+	slog.Info("Successfully identified eBay user", "username", user, "sealiftUserId", sealiftUserId)
 
 	loc, err := time.LoadLocation(timezone)
 	if err != nil {
@@ -120,13 +124,17 @@ func (c *Client) AuthUser(ctx context.Context, authCode string) (string, error) 
 
 	expiresAt := time.Now().In(loc).Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 
-	filter := bson.D{{Key: "user", Value: user}}
+	filter := bson.M{
+		"user":            user,
+		"sealift_user_id": sealiftUserId,
+	}
 	update := bson.M{
 		"$set": UserTokenDocument{
-			User:         user,
-			AccessToken:  tokenResp.AccessToken,
-			RefreshToken: tokenResp.RefreshToken,
-			ExpiresAt:    expiresAt,
+			User:          user,
+			SealiftUserId: sealiftUserId,
+			AccessToken:   tokenResp.AccessToken,
+			RefreshToken:  tokenResp.RefreshToken,
+			ExpiresAt:     expiresAt,
 		},
 	}
 
@@ -255,36 +263,20 @@ func (c *Client) getUser(accessToken string) (string, error) {
 		return "", fmt.Errorf("failed to read user resp body; %w", err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		slog.Error("eBay Identity API returned error status", "status", resp.Status, "body", string(body))
+		return "", fmt.Errorf("identity API failed with status: %s", resp.Status)
+	}
+
 	var userResp UserResponse
 	if err := json.Unmarshal(body, &userResp); err != nil {
+		slog.Error("Failed to unmarshal user identity response", "body", string(body), "err", err)
 		return "", fmt.Errorf("failed to unmarshal user resp body; %w", err)
 	}
+
+	slog.Debug("Identity API response parsed", "username", userResp.Username)
 	return userResp.Username, nil
 }
-
-// getToken gets or refreshes a OAuth user token associated with a particular user.
-// func (c *Client) GetToken(user string) (string, error) {
-// 	c.Sellers.Lock()
-// 	defer c.Sellers.Unlock()
-
-// 	token, exists := c.Sellers.tokens[user]
-// 	if !exists {
-// 		return "", fmt.Errorf("no token for seller %s", user)
-// 	}
-
-// 	if time.Until(token.expiresAt) < 5*time.Minute {
-// 		slog.Info("found expired/expiring token; refreshing", "user", user)
-// 		newToken, err := c.refreshToken(token.refreshToken)
-// 		if err != nil {
-// 			return "", fmt.Errorf("failed to refresh token; %w", err)
-// 		}
-// 		token.accessToken = newToken.AccessToken
-// 		token.refreshToken = newToken.RefreshToken
-// 		token.expiresAt = time.Now().Add(time.Duration(newToken.ExpiresIn) * time.Second)
-// 	}
-
-// 	return token.accessToken, nil
-// }
 
 // GetToken gets or refreshes a OAuth user token associated with a particular user.
 // A token has to be initialized for a user i.e. after AuthUser().
@@ -294,7 +286,11 @@ func (c *Client) GetToken(ctx context.Context, user string) (string, error) {
 	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	filter := bson.D{{Key: "user", Value: user}}
+	filter := bson.M{"user": user}
+	if userID, ok := ctx.Value("userId").(string); ok && userID != "" {
+		filter["sealift_user_id"] = userID
+	}
+
 	var token UserTokenDocument
 	err := c.DB.FindOne(dbCtx, filter).Decode(&token)
 	if err != nil {
@@ -322,16 +318,12 @@ func (c *Client) GetToken(ctx context.Context, user string) (string, error) {
 
 		// update document, refresh token remains the same
 		newExpiresAt := time.Now().In(loc).Add(time.Duration(newToken.ExpiresIn) * time.Second)
-		filter := bson.D{{Key: "user", Value: user}}
 		update := bson.M{
-			"$set": UserTokenDocument{
-				User:         user,
-				AccessToken:  newToken.AccessToken,
-				ExpiresAt:    newExpiresAt,
-				RefreshToken: token.RefreshToken,
+			"$set": bson.M{
+				"access_token": newToken.AccessToken,
+				"expires_at":   newExpiresAt,
 			},
 		}
-
 		result := c.DB.FindOneAndUpdate(dbCtx, filter, update)
 		if result.Err() != nil {
 			return "", fmt.Errorf("failed to update user token document; %w", err)

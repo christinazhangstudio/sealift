@@ -14,5 +14,6 @@ ENV ZONEINFO /zoneinfo.zip
 
 WORKDIR /root/
 COPY --from=builder /app/sealift .
+COPY --from=builder /app/docs ./docs
 EXPOSE 443
 CMD ["./sealift"]

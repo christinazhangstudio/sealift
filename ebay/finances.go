@@ -2,11 +2,10 @@ package ebay
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"strconv"
+
+	"github.tesla.com/chrzhang/sealift/auth"
 )
 
 // "Important! You should not use any API response or notification,
@@ -70,63 +69,17 @@ type ErrorParameter struct {
 func (c *Client) GetTransactionSummary(
 	ctx context.Context,
 ) (*TransactionSummaryResponse, error) {
-	//https://developer.ebay.com/api-docs/sell/finances/types/pay:TransactionStatusEnum
-	params := map[string]string{
-		"filter": "transactionStatus:{PAYOUT}",
-	}
-	req, err := c.request(
-		ctx,
-		financesAPI,
-		"transaction_summary",
-		params,
-	)
+	token, err := c.Auth.GetToken(ctx, ctx.Value(auth.USER).(string))
 	if err != nil {
-		return nil, fmt.Errorf("failed to make request; %w", err)
+		return nil, fmt.Errorf("failed to get or refresh user token; %w", err)
 	}
 
-	resp, err := c.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to do request; %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body; %w", err)
-	}
-
-	// return empty resp
-	if resp.StatusCode == http.StatusNoContent {
-		return &TransactionSummaryResponse{}, nil
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		var errResp ErrorResponse
-		if err := json.Unmarshal(body, &errResp); err != nil {
-			return nil, fmt.Errorf(
-				"failed to unmarshal error response with status %d; %w; body %s",
-				resp.StatusCode,
-				err,
-				string(body),
-			)
-		}
-		if len(errResp.Errors) > 0 {
-			return nil, fmt.Errorf("API failed with status %d with error %d: %s",
-				resp.StatusCode,
-				errResp.Errors[0].ErrorID,
-				errResp.Errors[0].LongMessage,
-			)
-		}
-
-		return nil, fmt.Errorf("API failed with status %d with unknown error: %s",
-			resp.StatusCode,
-			string(body),
-		)
-	}
-
+	url := fmt.Sprintf("%s%stransaction_summary?filter=transactionStatus:{PAYOUT}", c.URL, financesAPI)
 	var summary TransactionSummaryResponse
-	if err := json.Unmarshal(body, &summary); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal success response; %w", err)
+	
+	err = c.doJSON(ctx, http.MethodGet, url, token, nil, &summary)
+	if err != nil {
+		return nil, err
 	}
 
 	return &summary, nil
@@ -164,63 +117,17 @@ func (c *Client) GetPayouts(
 	pageSize int,
 	pageIdx int, // 0 indexed
 ) (*PayoutsResponse, error) {
-	params := map[string]string{
-		"limit":  strconv.Itoa(pageSize),
-		"offset": strconv.Itoa(pageIdx * pageSize),
-	}
-	req, err := c.request(
-		ctx,
-		financesAPI,
-		"payout",
-		params,
-	)
+	token, err := c.Auth.GetToken(ctx, ctx.Value(auth.USER).(string))
 	if err != nil {
-		return nil, fmt.Errorf("failed to make request; %w", err)
+		return nil, fmt.Errorf("failed to get or refresh user token; %w", err)
 	}
 
-	resp, err := c.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to do request; %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body; %w", err)
-	}
-
-	// return empty resp
-	if resp.StatusCode == http.StatusNoContent {
-		return &PayoutsResponse{}, nil
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		var errResp ErrorResponse
-		if err := json.Unmarshal(body, &errResp); err != nil {
-			return nil, fmt.Errorf(
-				"failed to unmarshal error response with status %d; %w; body %s",
-				resp.StatusCode,
-				err,
-				string(body),
-			)
-		}
-		if len(errResp.Errors) > 0 {
-			return nil, fmt.Errorf("API failed with status %d with error %d: %s",
-				resp.StatusCode,
-				errResp.Errors[0].ErrorID,
-				errResp.Errors[0].LongMessage,
-			)
-		}
-
-		return nil, fmt.Errorf("API failed with status %d with unknown error: %s",
-			resp.StatusCode,
-			string(body),
-		)
-	}
-
+	url := fmt.Sprintf("%s%spayout?limit=%d&offset=%d", c.URL, financesAPI, pageSize, pageIdx*pageSize)
 	var payouts PayoutsResponse
-	if err := json.Unmarshal(body, &payouts); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal success response; %w", err)
+
+	err = c.doJSON(ctx, http.MethodGet, url, token, nil, &payouts)
+	if err != nil {
+		return nil, err
 	}
 
 	return &payouts, nil
