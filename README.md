@@ -19,7 +19,7 @@ ngrok.exe http --host-header=rewrite http://localhost:443
 ```
 ngrok will show a HTML page with a browser warning by default.
 To circumvent this, can add `ngrok-skip-browser-warning` to a request header. Chrome extension [Requestly](https://requestly.com/) is the more automated way to do this:
-![requestly](./docs/img/requestly.png)
+![requestly](./img/requestly.png)
 
 ### docker
 
