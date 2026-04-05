@@ -10,17 +10,19 @@ docker run -d `
     -e "ENDPOINT_URL=https://mydomain.com/sealift-webhook" `
     -e "VERIFICATION_TOKEN=<>" `
     -e "PORT=:443" `
-    -e "EBAY_CLIENT_ID=<>" `
-    -e "EBAY_CLIENT_SECRET=<>" `
-    -e "EBAY_URL=https://apiz.ebay.com" `
-    -e "EBAY_NOTIFICATION_URL=https://api.ebay.com" `
-    -e "EBAY_AUTH_URL=https://api.ebay.com/identity/v1/oauth2/token" `
-    -e "EBAY_AUTH_REDIRECT_URI=<>" `
-    -e "EBAY_SIGN_IN=<>" `
-    -e "EBAY_TRAD_DLL_URL=https://api.ebay.com/ws/api.dll" `
-    -e "EBAY_SIGN_IN=<>" `
+    -e "EBAY_SCOPE=<>" `
     -e "MONGO_URI=mongodb://host.docker.internal:27017" `
-    -e "FRONTEND_URL=http://localhost:3000" `
+    -e "ATLAS_URI=<>" `
+    -e "FRONTEND_URL=http://host.docker.internal:9997" `
+    -e "OLLAMA_URL=http://host.docker.internal:11434" `
+    -e "OPENAI_API_KEY=<>" `
+    -e "AI_SIMILARITY_THRESHOLD=0.5" `
+    -e "USE_SELF_HOSTED_AI=true" `
+    -e "SELF_HOSTED_AI_URL=<>" `
+    -e "SELF_HOSTED_AI_MODEL=qwen" `
+    -e "GROQ_AI_MODEL=llama-3.3-70b-versatile" `
+    -v "$($PWD.Path)/docs:/root/docs" `
+    -v "$($PWD.Path)/prompts:/root/prompts" `
     -p "443:443" `
     "sealift:latest"
 

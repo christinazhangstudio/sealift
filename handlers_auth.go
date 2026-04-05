@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.tesla.com/chrzhang/sealift/auth"
+	"github.tesla.com/chrzhang/sealift/ebay"
 	"github.tesla.com/chrzhang/sealift/html"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -61,20 +62,20 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Email already exists", http.StatusConflict)
 			return
 		}
-		slog.Error("Failed to create user", "err", err)
+		slog.Error("failed to create user", "err", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
 	newTenantID := result.InsertedID.(primitive.ObjectID).Hex()
-	slog.Info("Created new Sealift tenant", "tenantID", newTenantID)
+	slog.Info("created new Sealift tenant", "tenantID", newTenantID)
 
 	// Create tenant-level notification destination immediately
 	go func(tenantID string) {
-		slog.Info("Registering tenant-level notification destination", "tenantID", tenantID)
+		slog.Info("registering tenant-level notification destination", "tenantID", tenantID)
 		dynamicClient, _, err := s.getEbayClientForUser(context.Background(), tenantID)
 		if err != nil {
-			slog.Error("Registration background task failed: client-init", "err", err, "tenantID", tenantID)
+			slog.Error("failed to register tenant", "err", err, "tenantID", tenantID)
 			return
 		}
 
@@ -84,9 +85,9 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 
 		destID, err := dynamicClient.CreateDestination(destCtx, destinationURL, verificationToken)
 		if err != nil {
-			slog.Warn("Registration background task warning: destination already exists or failed", "err", err, "url", destinationURL)
+			slog.Warn("failed to create destination", "err", err, "url", destinationURL)
 		} else {
-			slog.Info("Successfully created tenant notification destination", "tenantID", tenantID, "destID", destID)
+			slog.Info("successfully created tenant notification destination", "tenantID", tenantID, "destID", destID)
 			// Store the destination ID on the tenant record
 			objID, _ := primitive.ObjectIDFromHex(tenantID)
 			s.sealiftUsersCol.UpdateOne(context.Background(), bson.M{"_id": objID}, bson.M{"$set": bson.M{"destinationID": destID}})
@@ -132,9 +133,9 @@ func (s *Server) handleRegisterSeller(w http.ResponseWriter, r *http.Request) {
 
 	var authUrl string
 	if user.EbayDeveloperConfig.IsSandbox || strings.Contains(user.EbayDeveloperConfig.AppID, "SBX-") {
-		authUrl = "https://auth.sandbox.ebay.com"
+		authUrl = ebay.SandboxSignInURL
 	} else {
-		authUrl = "https://auth.ebay.com"
+		authUrl = ebay.ProdSignInURL
 	}
 
 	consentURL := fmt.Sprintf(

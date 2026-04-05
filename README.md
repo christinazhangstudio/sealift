@@ -80,6 +80,10 @@ get <token> from `authjs.session-token` (for dev) Cookie in DevTools
 curl -X DELETE "http://localhost:443/api/notification/destinations" --cookie "authjs.session-token=<token>" | jq .
 ```
 
+notifications for sandbox might be limited; 
+configure the notifs like so in order to enable notifications:
+![alt text](img/sandbox_notifs.png)
+
 ## ai
 when asking a question at `/ai/ask`, sealift attempts Atlas Vector Search first.
 
