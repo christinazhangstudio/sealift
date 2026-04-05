@@ -10,8 +10,9 @@ import (
 )
 
 func (s *Server) handleGetNotes(w http.ResponseWriter, r *http.Request) {
+	userID, _ := r.Context().Value("userId").(string)
 	notesDB := s.notesCol
-	allNotes, err := notes.GetNotes(r.Context(), notesDB)
+	allNotes, err := notes.GetNotes(r.Context(), notesDB, userID)
 	if err != nil {
 		slog.Error("failed to get notes", "err", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -23,6 +24,7 @@ func (s *Server) handleGetNotes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateNote(w http.ResponseWriter, r *http.Request) {
+	userID, _ := r.Context().Value("userId").(string)
 	var req struct {
 		Content string `json:"content"`
 		Color   string `json:"color"`
@@ -35,7 +37,7 @@ func (s *Server) handleCreateNote(w http.ResponseWriter, r *http.Request) {
 	}
 
 	notesDB := s.notesCol
-	err := notes.CreateNote(r.Context(), notesDB, req.Content, req.Color)
+	err := notes.CreateNote(r.Context(), notesDB, userID, req.Content, req.Color)
 	if err != nil {
 		slog.Error("failed to create note", "err", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -47,6 +49,7 @@ func (s *Server) handleCreateNote(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateNote(w http.ResponseWriter, r *http.Request) {
+	userID, _ := r.Context().Value("userId").(string)
 	id := r.PathValue("id")
 	if id == "" {
 		slog.Error("id not specified")
@@ -66,7 +69,7 @@ func (s *Server) handleUpdateNote(w http.ResponseWriter, r *http.Request) {
 	}
 
 	notesDB := s.notesCol
-	err := notes.UpdateNote(r.Context(), notesDB, id, req.Content, req.Color)
+	err := notes.UpdateNote(r.Context(), notesDB, userID, id, req.Content, req.Color)
 	if err != nil {
 		slog.Error("failed to update note", "err", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -78,6 +81,7 @@ func (s *Server) handleUpdateNote(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteNote(w http.ResponseWriter, r *http.Request) {
+	userID, _ := r.Context().Value("userId").(string)
 	id := r.PathValue("id")
 	if id == "" {
 		slog.Error("id not specified")
@@ -86,7 +90,7 @@ func (s *Server) handleDeleteNote(w http.ResponseWriter, r *http.Request) {
 	}
 
 	notesDB := s.notesCol
-	err := notes.DeleteNote(r.Context(), notesDB, id)
+	err := notes.DeleteNote(r.Context(), notesDB, userID, id)
 	if err != nil {
 		slog.Error("failed to delete notes", "err", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)

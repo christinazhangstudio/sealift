@@ -26,10 +26,6 @@ const (
 	timezone = "America/Chicago"
 )
 
-const (
-	userAPI = "https://apiz.ebay.com/commerce/identity/v1/user/"
-)
-
 type Client struct {
 	// HTTP client for making auth related API calls.
 	*http.Client
@@ -57,6 +53,9 @@ type Client struct {
 
 	// DevID used for specific APIs, such as GetAccount.
 	DevID string
+
+	// UserAPI specifies the Identity API endpoint.
+	UserAPI string
 }
 
 type UserTokenDocument struct {
@@ -241,7 +240,7 @@ type UserResponse struct {
 func (c *Client) getUser(accessToken string) (string, error) {
 	req, err := http.NewRequest(
 		http.MethodGet,
-		userAPI,
+		c.UserAPI,
 		nil,
 	)
 	if err != nil {
