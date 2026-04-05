@@ -44,18 +44,18 @@ func (s *Server) getEbayClientForUser(
 		return nil, user, fmt.Errorf("failed to find user: %w", err)
 	}
 
-	u := ebayURL
-	tu := ebayTradURL
-	nu := ebayNotificationURL
-	au := ebayAuthURL
-	uu := "https://apiz.ebay.com/commerce/identity/v1/user/"
+	u := ebay.ProdAPIURL
+	tu := ebay.ProdTradURL
+	nu := ebay.ProdNotificationURL
+	au := ebay.ProdAuthURL
+	uu := ebay.ProdIdentityURL
 
 	if user.EbayDeveloperConfig.IsSandbox || strings.Contains(user.EbayDeveloperConfig.AppID, "SBX-") {
-		u = "https://apiz.sandbox.ebay.com"
-		tu = "https://api.sandbox.ebay.com/ws/api.dll"
-		nu = "https://api.sandbox.ebay.com"
-		au = "https://api.sandbox.ebay.com/identity/v1/oauth2/token"
-		uu = "https://apiz.sandbox.ebay.com/commerce/identity/v1/user/"
+		u = ebay.SandboxAPIURL
+		tu = ebay.SandboxTradURL
+		nu = ebay.SandboxNotificationURL
+		au = ebay.SandboxAuthURL
+		uu = ebay.SandboxIdentityURL
 	}
 
 	return &ebay.Client{

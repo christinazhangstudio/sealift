@@ -42,18 +42,14 @@ type ChallengeResponse struct {
 }
 
 var (
-	verificationToken   = os.Getenv("VERIFICATION_TOKEN")
-	endpointURL         = os.Getenv("ENDPOINT_URL") // for notifications
-	ebayURL             = os.Getenv("EBAY_URL")
-	ebayTradURL         = os.Getenv("EBAY_TRAD_DLL_URL")
-	ebayAuthURL         = os.Getenv("EBAY_AUTH_URL")
-	ebayNotificationURL = os.Getenv("EBAY_NOTIFICATION_URL")
-	mongoURI            = os.Getenv("MONGO_URI")
-	atlasURI            = os.Getenv("ATLAS_URI")
-	frontendURL         = os.Getenv("FRONTEND_URL")
-	port                = os.Getenv("PORT")
-	ollamaURL           = os.Getenv("OLLAMA_URL")
-	ebayScope           = os.Getenv("EBAY_SCOPE")
+	verificationToken = os.Getenv("VERIFICATION_TOKEN")
+	endpointURL       = os.Getenv("ENDPOINT_URL") // for notifications
+	mongoURI          = os.Getenv("MONGO_URI")
+	atlasURI          = os.Getenv("ATLAS_URI")
+	frontendURL       = os.Getenv("FRONTEND_URL")
+	port              = os.Getenv("PORT")
+	ollamaURL         = os.Getenv("OLLAMA_URL")
+	ebayScope         = os.Getenv("EBAY_SCOPE")
 )
 
 func main() {
