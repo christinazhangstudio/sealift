@@ -221,8 +221,8 @@ func (s *Server) handleAIAsk(w http.ResponseWriter, r *http.Request) {
 
 	answer, err := getCompletion(query, llmContext, isCasualChat)
 	if err != nil {
-		slog.Error("AI completion failed", "err", err)
-		http.Error(w, "Failed to generate answer", http.StatusInternalServerError)
+		slog.Error("failed to generate answer", "err", err)
+		http.Error(w, "Failed to generate answer; AI server temporarily down?", http.StatusInternalServerError)
 		return
 	}
 
