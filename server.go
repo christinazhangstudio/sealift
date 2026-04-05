@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.tesla.com/chrzhang/sealift/auth"
 	"github.tesla.com/chrzhang/sealift/ebay"
@@ -43,19 +44,34 @@ func (s *Server) getEbayClientForUser(
 		return nil, user, fmt.Errorf("failed to find user: %w", err)
 	}
 
+	u := ebayURL
+	tu := ebayTradURL
+	nu := ebayNotificationURL
+	au := ebayAuthURL
+	uu := "https://apiz.ebay.com/commerce/identity/v1/user/"
+
+	if user.EbayDeveloperConfig.IsSandbox || strings.Contains(user.EbayDeveloperConfig.AppID, "SBX-") {
+		u = "https://apiz.sandbox.ebay.com"
+		tu = "https://api.sandbox.ebay.com/ws/api.dll"
+		nu = "https://api.sandbox.ebay.com"
+		au = "https://api.sandbox.ebay.com/identity/v1/oauth2/token"
+		uu = "https://apiz.sandbox.ebay.com/commerce/identity/v1/user/"
+	}
+
 	return &ebay.Client{
 		Client:          s.httpClient,
-		URL:             ebayURL,
-		TradURL:         ebayTradURL,
-		NotificationURL: ebayNotificationURL,
+		URL:             u,
+		TradURL:         tu,
+		NotificationURL: nu,
 		Auth: &auth.Client{
 			Client:       s.httpClient,
 			DB:           s.ebayAccountsCol,
-			AuthURL:      ebayAuthURL,
+			AuthURL:      au,
 			RedirectURI:  user.EbayDeveloperConfig.RedirectURI,
 			ClientID:     user.EbayDeveloperConfig.AppID,
 			ClientSecret: user.EbayDeveloperConfig.CertID,
 			DevID:        user.EbayDeveloperConfig.DevID,
+			UserAPI:      uu,
 		},
 	}, user, nil
 }
@@ -88,6 +104,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/internal/get-user", s.handleGetUser) // server-to-server (call originates from NextJS Auth)
 	s.mux.HandleFunc("/api/register-seller", s.handleRegisterSeller)
 	s.mux.HandleFunc("/api/auth-callback", s.handleAuthCallback)
+	s.mux.HandleFunc("DELETE /api/delete-account", s.handleDeleteAccount)
 
 	// eBay
 	s.mux.HandleFunc("GET /api/users", s.handleGetUsers)

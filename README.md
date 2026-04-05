@@ -77,7 +77,7 @@ curl -X GET "http://localhost:443/api/notification/destinations" --cookie "authj
 get <token> from `authjs.session-token` (for dev) Cookie in DevTools
 
 ```
-curl -X DELETE "http://localhost:443/api/notification/destinations/allusers" --cookie "authjs.session-token=<token>" | jq .
+curl -X DELETE "http://localhost:443/api/notification/destinations" --cookie "authjs.session-token=<token>" | jq .
 ```
 
 ## ai

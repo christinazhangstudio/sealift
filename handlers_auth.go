@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.tesla.com/chrzhang/sealift/auth"
@@ -129,8 +130,21 @@ func (s *Server) handleRegisterSeller(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	baseAuthURL := "https://auth.ebay.com/oauth2/authorize?response_type=code&scope=https://api.ebay.com/oauth/api_scope https://api.ebay.com/oauth/api_scope/sell.marketing.readonly https://api.ebay.com/oauth/api_scope/sell.marketing https://api.ebay.com/oauth/api_scope/sell.inventory.readonly https://api.ebay.com/oauth/api_scope/sell.inventory https://api.ebay.com/oauth/api_scope/sell.account.readonly https://api.ebay.com/oauth/api_scope/sell.account https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly https://api.ebay.com/oauth/api_scope/sell.fulfillment https://api.ebay.com/oauth/api_scope/sell.analytics.readonly https://api.ebay.com/oauth/api_scope/sell.finances https://api.ebay.com/oauth/api_scope/sell.payment.dispute https://api.ebay.com/oauth/api_scope/commerce.identity.readonly https://api.ebay.com/oauth/api_scope/sell.reputation https://api.ebay.com/oauth/api_scope/sell.reputation.readonly https://api.ebay.com/oauth/api_scope/commerce.notification.subscription https://api.ebay.com/oauth/api_scope/commerce.notification.subscription.readonly https://api.ebay.com/oauth/api_scope/sell.stores https://api.ebay.com/oauth/api_scope/sell.stores.readonly https://api.ebay.com/oauth/scope/sell.edelivery https://api.ebay.com/oauth/api_scope/commerce.message"
-	consentURL := fmt.Sprintf("%s&client_id=%s&redirect_uri=%s&state=%s", baseAuthURL, user.EbayDeveloperConfig.AppID, user.EbayDeveloperConfig.RedirectURI, userID)
+	var authUrl string
+	if user.EbayDeveloperConfig.IsSandbox || strings.Contains(user.EbayDeveloperConfig.AppID, "SBX-") {
+		authUrl = "https://auth.sandbox.ebay.com"
+	} else {
+		authUrl = "https://auth.ebay.com"
+	}
+
+	consentURL := fmt.Sprintf(
+		"%s/oauth2/authorize?client_id=%s&response_type=code&redirect_uri=%s&scope=%s&state=%s",
+		authUrl,
+		user.EbayDeveloperConfig.AppID,
+		user.EbayDeveloperConfig.RedirectURI,
+		ebayScope,
+		userID,
+	)
 
 	slog.Info("redirecting to oauth consent page", "userId", userID)
 	http.Redirect(w, r, consentURL, http.StatusTemporaryRedirect)
@@ -176,4 +190,134 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	slog.Info("Handshake Complete: seller authorized and written to DB", "ebayUser", ebayUserStore, "tenantID", userID)
 
 	html.RenderAuthSuccess(w, frontendURL)
+}
+
+// handleDeleteAccount permanently deletes the Sealift tenant and all associated resources.
+// Cleanup order: subscriptions → destination → ebay_accounts → inbox → notes → sealift_user
+func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID, ok := r.Context().Value("userId").(string)
+	if !ok || userID == "" {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	slog.Info("DELETE ACCOUNT initiated", "tenantID", userID)
+
+	// Build the eBay client for this tenant
+	dynamicClient, sealiftUser, err := s.getEbayClientForUser(r.Context(), userID)
+	if err != nil {
+		slog.Error("Failed to build client for account deletion", "err", err, "tenantID", userID)
+		http.Error(w, "Failed to resolve tenant credentials", http.StatusInternalServerError)
+		return
+	}
+
+	// 1. Get all eBay sellers under this tenant
+	sellers, err := dynamicClient.Auth.GetUsers(r.Context(), userID)
+	if err != nil {
+		slog.Warn("Failed to enumerate sellers during account deletion", "err", err, "tenantID", userID)
+	}
+
+	// 2. For each seller: delete all eBay notification subscriptions
+	// safe because DeleteAllUserSubscriptions is scoped to the
+	// tenant's own eBay API credentials
+	// (the subscriptions belong to the tenant's app, not the seller globally).
+	// So each tenant's subscriptions are independent even for shared sellers.
+	for _, seller := range sellers {
+		sellerCtx := context.WithValue(r.Context(), auth.USER, seller)
+		if err := dynamicClient.DeleteAllUserSubscriptions(sellerCtx); err != nil {
+			slog.Warn("Failed to delete subscriptions for seller", "seller", seller, "err", err)
+		} else {
+			slog.Info("Deleted all subscriptions for seller", "seller", seller)
+		}
+	}
+
+	// 3. Disable and delete the tenant's notification destination
+	if sealiftUser.DestinationID != "" {
+		destinationURL := fmt.Sprintf("%s/tenant/%s", endpointURL, userID)
+		if err := dynamicClient.DisableDestination(r.Context(), sealiftUser.DestinationID, destinationURL, verificationToken); err != nil {
+			slog.Warn("Failed to disable tenant destination", "destID", sealiftUser.DestinationID, "err", err)
+		}
+		if err := dynamicClient.DeleteDestination(r.Context(), sealiftUser.DestinationID); err != nil {
+			slog.Warn("Failed to delete tenant destination", "destID", sealiftUser.DestinationID, "err", err)
+		} else {
+			slog.Info("Deleted tenant notification destination", "destID", sealiftUser.DestinationID)
+		}
+	}
+
+	dbCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	// 4. Delete all ebay_accounts for this tenant
+	ebayResult, err := s.ebayAccountsCol.DeleteMany(dbCtx, bson.M{"sealift_user_id": userID})
+	if err != nil {
+		slog.Warn("Failed to delete ebay_accounts", "err", err, "tenantID", userID)
+	} else {
+		slog.Info("Deleted ebay_accounts", "count", ebayResult.DeletedCount, "tenantID", userID)
+	}
+
+	// 5. Delete inbox notifications ONLY for sellers exclusive to this tenant.
+	// Two tenants can register the same eBay seller -- inbox docs are keyed by
+	// seller username without a tenant scope, so we must not wipe data that
+	// another tenant still depends on.
+	for _, seller := range sellers {
+		otherTenantCount, err := s.ebayAccountsCol.CountDocuments(dbCtx, bson.M{
+			"user":            seller,
+			"sealift_user_id": bson.M{"$ne": userID},
+		})
+		if err != nil {
+			slog.Warn("Failed to check shared seller ownership", "seller", seller, "err", err)
+			continue
+		}
+		if otherTenantCount > 0 {
+			slog.Info("Skipping inbox deletion - seller is shared with another tenant", "seller", seller, "otherTenants", otherTenantCount)
+			continue
+		}
+
+		inboxResult, err := s.inboxReceiver.DB.DeleteMany(dbCtx, bson.M{"user": seller})
+		if err != nil {
+			slog.Warn("Failed to delete inbox for seller", "seller", seller, "err", err)
+		} else {
+			slog.Info("Deleted inbox notifications", "seller", seller, "count", inboxResult.DeletedCount)
+		}
+	}
+
+	// 6. Delete all notes for this tenant
+	notesResult, err := s.notesCol.DeleteMany(dbCtx, bson.M{"sealift_user_id": userID})
+	if err != nil {
+		slog.Warn("Failed to delete notes", "err", err, "tenantID", userID)
+	} else {
+		slog.Info("Deleted notes", "count", notesResult.DeletedCount, "tenantID", userID)
+	}
+
+	// 7. Delete the sealift_users document itself
+	objID, err := primitive.ObjectIDFromHex(userID)
+	if err != nil {
+		slog.Error("Invalid tenant ObjectID during account deletion", "err", err, "tenantID", userID)
+		http.Error(w, "Invalid tenant ID", http.StatusBadRequest)
+		return
+	}
+	userResult, err := s.sealiftUsersCol.DeleteOne(dbCtx, bson.M{"_id": objID})
+	if err != nil {
+		slog.Error("Failed to delete sealift_user", "err", err, "tenantID", userID)
+		http.Error(w, "Failed to delete account", http.StatusInternalServerError)
+		return
+	}
+	if userResult.DeletedCount == 0 {
+		slog.Error("sealift_user not found for deletion", "tenantID", userID)
+		http.Error(w, "Account not found", http.StatusNotFound)
+		return
+	}
+
+	slog.Info("DELETE ACCOUNT completed", "tenantID", userID, "sellersRemoved", len(sellers))
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":          "deleted",
+		"sellers_removed": len(sellers),
+	})
 }

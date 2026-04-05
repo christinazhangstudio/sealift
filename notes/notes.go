@@ -12,19 +12,26 @@ import (
 )
 
 type Note struct {
-	ID      primitive.ObjectID `json:"id" bson:"_id"`
-	Content string             `json:"content" bson:"content"`
-	Color   string             `json:"color" bson:"color"`
+	ID            primitive.ObjectID `json:"id" bson:"_id"`
+	SealiftUserID string             `json:"sealift_user_id" bson:"sealift_user_id"`
+	Content       string             `json:"content" bson:"content"`
+	Color         string             `json:"color" bson:"color"`
 }
 
 func GetNotes(
 	ctx context.Context,
 	notesDB *mongo.Collection,
+	sealiftUserID string,
 ) ([]Note, error) {
 	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	result, err := notesDB.Find(dbCtx, bson.M{})
+	filter := bson.M{}
+	if sealiftUserID != "" {
+		filter["sealift_user_id"] = sealiftUserID
+	}
+
+	result, err := notesDB.Find(dbCtx, filter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find notes; %w", err)
 	}
@@ -35,17 +42,13 @@ func GetNotes(
 		return nil, fmt.Errorf("failed to decode notes; %w", err)
 	}
 
-	// convert ObjectID to string for JSON
-	// for i := range notes {
-	// 	notes[i].ID = notes[i].ID
-	// }
-
 	return notes, nil
 }
 
 func CreateNote(
 	ctx context.Context,
 	notesDB *mongo.Collection,
+	sealiftUserID string,
 	content string,
 	color string,
 ) error {
@@ -53,9 +56,10 @@ func CreateNote(
 		color = getRandomColor() // Fallback to random color if not provided
 	}
 	newNote := Note{
-		ID:      primitive.NewObjectID(),
-		Content: content,
-		Color:   color,
+		ID:            primitive.NewObjectID(),
+		SealiftUserID: sealiftUserID,
+		Content:       content,
+		Color:         color,
 	}
 
 	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -71,6 +75,7 @@ func CreateNote(
 func UpdateNote(
 	ctx context.Context,
 	notesDB *mongo.Collection,
+	sealiftUserID string,
 	id string,
 	content string,
 	color string,
@@ -78,6 +83,11 @@ func UpdateNote(
 	objectID, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
 		return fmt.Errorf("failed to get object ID from hex; %w", err)
+	}
+
+	filter := bson.M{"_id": objectID}
+	if sealiftUserID != "" {
+		filter["sealift_user_id"] = sealiftUserID
 	}
 
 	updateFields := bson.M{"content": content}
@@ -90,7 +100,7 @@ func UpdateNote(
 	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	result, err := notesDB.UpdateOne(dbCtx, bson.M{"_id": objectID}, update)
+	result, err := notesDB.UpdateOne(dbCtx, filter, update)
 	if err != nil {
 		return fmt.Errorf("failed to update note; %w", err)
 	}
@@ -105,6 +115,7 @@ func UpdateNote(
 func DeleteNote(
 	ctx context.Context,
 	notesDB *mongo.Collection,
+	sealiftUserID string,
 	id string,
 ) error {
 	objectID, err := primitive.ObjectIDFromHex(id)
@@ -112,10 +123,15 @@ func DeleteNote(
 		return fmt.Errorf("failed to get object ID from hex; %w", err)
 	}
 
+	filter := bson.M{"_id": objectID}
+	if sealiftUserID != "" {
+		filter["sealift_user_id"] = sealiftUserID
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	result, err := notesDB.DeleteOne(ctx, bson.M{"_id": objectID})
+	result, err := notesDB.DeleteOne(ctx, filter)
 	if err != nil {
 		return fmt.Errorf("failed to delete note; %w", err)
 	}

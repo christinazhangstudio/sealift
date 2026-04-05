@@ -33,6 +33,7 @@ type EbayDeveloperConfig struct {
 	DevID       string `bson:"devId" json:"devId"`
 	CertID      string `bson:"certId" json:"certId"`
 	RedirectURI string `bson:"redirectUri" json:"redirectUri"` // BYOK callback URL
+	IsSandbox   bool   `bson:"isSandbox" json:"isSandbox"`
 }
 
 // ChallengeResponse for the verification response.
@@ -52,6 +53,7 @@ var (
 	frontendURL         = os.Getenv("FRONTEND_URL")
 	port                = os.Getenv("PORT")
 	ollamaURL           = os.Getenv("OLLAMA_URL")
+	ebayScope           = os.Getenv("EBAY_SCOPE")
 )
 
 func main() {
