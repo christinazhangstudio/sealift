@@ -80,10 +80,35 @@ func (s *Server) getEbayClientForUser(
 // Sealift tenant. Used for app-level API calls (e.g. GetPublicKey) where
 // no specific tenant ID is available, like the deletion webhook.
 func (s *Server) getAnyEbayClient(ctx context.Context) (*ebay.Client, error) {
+	// 1. Try global environment variables first (most robust for app-level webhooks)
+	if ebayAppID != "" && ebayCertID != "" {
+		u, tu, nu, au, uu := ebay.ProdAPIURL, ebay.ProdTradURL, ebay.ProdNotificationURL, ebay.ProdAuthURL, ebay.ProdIdentityURL
+		if strings.Contains(ebayAppID, "SBX-") {
+			u, tu, nu, au, uu = ebay.SandboxAPIURL, ebay.SandboxTradURL, ebay.SandboxNotificationURL, ebay.SandboxAuthURL, ebay.SandboxIdentityURL
+		}
+
+		return &ebay.Client{
+			Client:          s.httpClient,
+			URL:             u,
+			TradURL:         tu,
+			NotificationURL: nu,
+			Auth: &auth.Client{
+				Client:       s.httpClient,
+				DB:           s.ebayAccountsCol,
+				AuthURL:      au,
+				ClientID:     ebayAppID,
+				ClientSecret: ebayCertID,
+				DevID:        ebayDevID,
+				UserAPI:      uu,
+			},
+		}, nil
+	}
+
+	// 2. Fallback to borrowing from the first available tenant in DB
 	var user SealiftUser
 	err := s.sealiftUsersCol.FindOne(ctx, bson.M{}).Decode(&user)
 	if err != nil {
-		return nil, fmt.Errorf("no tenants available for credentials: %w", err)
+		return nil, fmt.Errorf("no tenants or ENV credentials available: %w", err)
 	}
 
 	client, _, err := s.getEbayClientForUser(ctx, user.ID.Hex())

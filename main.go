@@ -50,6 +50,9 @@ var (
 	port              = os.Getenv("PORT")
 	ollamaURL         = os.Getenv("OLLAMA_URL")
 	ebayScope         = os.Getenv("EBAY_SCOPE")
+	ebayAppID         = os.Getenv("EBAY_APP_ID")
+	ebayDevID         = os.Getenv("EBAY_DEV_ID")
+	ebayCertID        = os.Getenv("EBAY_CERT_ID")
 )
 
 func main() {
