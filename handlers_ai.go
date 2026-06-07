@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -233,6 +234,38 @@ func (s *Server) handleAIAsk(w http.ResponseWriter, r *http.Request) {
 		llmContext = fmt.Sprintf("Previous Conversation:\n%s\n\n%s", history, contextText)
 	}
 
+	stream := r.URL.Query().Get("stream") == "1" || r.URL.Query().Get("stream") == "true"
+	if stream {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		// Disable buffering for common reverse proxies (nginx, etc.)
+		w.Header().Set("X-Accel-Buffering", "no")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+
+		// Send headers immediately so the client can start receiving the stream
+		// without waiting for the first token.
+		flusher.Flush()
+
+		// Send an initial SSE comment. This helps force the response headers and
+		// connection to be established right away (useful behind proxies/load balancers).
+		fmt.Fprintf(w, ": connected\n\n")
+		flusher.Flush()
+
+		if err := streamCompletion(w, flusher, query, llmContext, isCasualChat, chunks); err != nil {
+			slog.Error("streamCompletion failed", "err", err)
+			// Best effort: send an error event
+			fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]string{"error": "AI streaming failed"}))
+			flusher.Flush()
+		}
+		return
+	}
+
 	answer, err := getCompletion(query, llmContext, isCasualChat)
 	if err != nil {
 		slog.Error("failed to generate answer", "err", err)
@@ -350,7 +383,7 @@ func getCompletion(query string, contextText string, isCasual bool) (string, err
 		}
 		body, _ := json.Marshal(payload)
 
-		client := &http.Client{Timeout: 300 * time.Second} // Long timeout for heavy self-hosted responses
+		client := &http.Client{Timeout: 10 * time.Minute} // Long timeout for heavy self-hosted responses / code completion style generations
 		req, _ := http.NewRequest("POST", baseURL, strings.NewReader(string(body)))
 		if cloudKey != "" {
 			req.Header.Set("Authorization", "Bearer "+cloudKey)
@@ -392,6 +425,152 @@ func getCompletion(query string, contextText string, isCasual bool) (string, err
 	}
 
 	return "", errors.New("no AI provider configured: set USE_SELF_HOSTED_AI + SELF_HOSTED_AI_CHAT_COMPLETIONS_URL (or OPENAI_API_KEY / GROQ_AI_MODEL)")
+}
+
+// mustJSON is a tiny helper for SSE event payloads.
+func mustJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return `{"error":"json marshal failed"}`
+	}
+	return string(b)
+}
+
+// streamCompletion streams tokens from the upstream OpenAI-compatible endpoint
+// (Groq, self-hosted vLLM/Ollama OpenAI compat, etc.) using SSE and forwards
+// simplified events to the client: {"token": "foo"} and a final {"done":true,"sources":[...]}
+func streamCompletion(
+	w http.ResponseWriter,
+	flusher http.Flusher,
+	query string,
+	contextText string,
+	isCasual bool,
+	sources []KnowledgeChunk,
+) error {
+	var prompt string
+	if isCasual {
+		prompt = loadPromptTemplate("prompts/casual.txt", map[string]string{"Query": query})
+	} else {
+		prompt = loadPromptTemplate("prompts/rag.txt", map[string]string{"Query": query, "Context": contextText})
+	}
+
+	cloudKey := openAIAPIKey
+	useSelfHosted := useSelfHostedAI == "true"
+
+	if cloudKey == "" && !useSelfHosted {
+		return errors.New("no AI provider configured for streaming")
+	}
+
+	baseURL := openAIBaseURL
+	if baseURL == "" {
+		baseURL = "https://api.groq.com/openai/v1/chat/completions"
+	} else {
+		baseURL = strings.TrimRight(baseURL, "/")
+	}
+	model := groqAIModel
+
+	if useSelfHosted {
+		selfHostedURL := selfHostedAIChatCompletionsURL
+		if selfHostedURL != "" {
+			baseURL = strings.TrimRight(selfHostedURL, "/")
+		} else {
+			return errors.New("SELF_HOSTED_AI_CHAT_COMPLETIONS_URL must be provided when USE_SELF_HOSTED_AI is true")
+		}
+		model = selfHostedAIChatCompletionsModel
+		if model == "" {
+			return errors.New("SELF_HOSTED_AI_CHAT_COMPLETIONS_MODEL must be provided when USE_SELF_HOSTED_AI is true")
+		}
+	}
+
+	if model == "" {
+		return errors.New("GROQ_AI_MODEL (or equivalent) must be explicitly provided")
+	}
+
+	payload := map[string]interface{}{
+		"model":  model,
+		"stream": true,
+		"messages": []map[string]string{
+			{"role": "user", "content": prompt},
+		},
+	}
+	body, _ := json.Marshal(payload)
+
+	client := &http.Client{Timeout: 10 * time.Minute} // allow long-running model generations
+	req, _ := http.NewRequest("POST", baseURL, strings.NewReader(string(body)))
+	if cloudKey != "" {
+		req.Header.Set("Authorization", "Bearer "+cloudKey)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+
+	slog.Info("Streaming AI request", "url", baseURL, "model", model)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyText, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("AI endpoint returned status %d: %s", resp.StatusCode, string(bodyText))
+	}
+
+	// Use a larger buffer for the scanner in case of large SSE events or slow token streams.
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // up to 1MB per line/event
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		dataStr := strings.TrimPrefix(line, "data: ")
+		trimmed := strings.TrimSpace(dataStr)
+		if trimmed == "" || trimmed == "[DONE]" {
+			continue
+		}
+
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+					Thinking         string `json:"thinking"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &chunk); err != nil {
+			// Some providers send other events; ignore
+			continue
+		}
+		if len(chunk.Choices) > 0 {
+			delta := chunk.Choices[0].Delta
+
+			// Support common extensions for "thinking" / reasoning tokens from models like DeepSeek-R1, Qwen, etc.
+			if delta.ReasoningContent != "" {
+				fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]string{"thinking": delta.ReasoningContent}))
+				flusher.Flush()
+			}
+			if delta.Thinking != "" {
+				fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]string{"thinking": delta.Thinking}))
+				flusher.Flush()
+			}
+			if delta.Content != "" {
+				fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]string{"token": delta.Content}))
+				flusher.Flush()
+			}
+		}
+	}
+
+	// Final event with sources so the client can attach citations
+	fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]any{"done": true, "sources": sources}))
+	flusher.Flush()
+
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	return nil
 }
 
 func cosineSimilarity(a, b []float32) float32 {

@@ -144,7 +144,7 @@ func main() {
 		Addr:         port,
 		Handler:      ch,
 		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 5 * time.Minute, // must be long enough for AI generation + response
+		WriteTimeout: 6 * time.Minute, // extended for long-running AI completions / streaming
 		IdleTimeout:  120 * time.Second,
 	}
 
