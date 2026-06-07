@@ -14,12 +14,13 @@ docker run -d `
     -e "MONGO_URI=mongodb://host.docker.internal:27017" `
     -e "ATLAS_URI=<>" `
     -e "FRONTEND_URL=http://host.docker.internal:9997" `
-    -e "OLLAMA_URL=http://host.docker.internal:11434" `
     -e "OPENAI_API_KEY=<>" `
     -e "AI_SIMILARITY_THRESHOLD=0.5" `
     -e "USE_SELF_HOSTED_AI=true" `
-    -e "SELF_HOSTED_AI_URL=<>" `
-    -e "SELF_HOSTED_AI_MODEL=qwen" `
+    -e "SELF_HOSTED_AI_CHAT_COMPLETIONS_URL=<>" `
+    -e "SELF_HOSTED_AI_CHAT_COMPLETIONS_MODEL=qwen" `
+    -e "SELF_HOSTED_EMBEDDING_URL=<>" `
+    -e "SELF_HOSTED_EMBEDDING_MODEL=snowflake" `
     -e "GROQ_AI_MODEL=llama-3.3-70b-versatile" `
     -v "$($PWD.Path)/docs:/root/docs" `
     -v "$($PWD.Path)/prompts:/root/prompts" `
