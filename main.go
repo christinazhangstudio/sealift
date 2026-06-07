@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/rs/cors"
@@ -47,8 +48,8 @@ var (
 	mongoURI          = os.Getenv("MONGO_URI")
 	atlasURI          = os.Getenv("ATLAS_URI")
 	frontendURL       = os.Getenv("FRONTEND_URL")
-	port      = os.Getenv("PORT")
-	ebayScope = os.Getenv("EBAY_SCOPE")
+	port              = os.Getenv("PORT")
+	ebayScope         = os.Getenv("EBAY_SCOPE")
 	ebayAppID         = os.Getenv("EBAY_APP_ID")
 	ebayDevID         = os.Getenv("EBAY_DEV_ID")
 	ebayCertID        = os.Getenv("EBAY_CERT_ID")
@@ -159,7 +160,7 @@ func main() {
 	// rcv kill command/interrupt
 	sigChan := make(chan os.Signal, 2)
 	signal.Notify(sigChan, os.Interrupt)
-	signal.Notify(sigChan, os.Kill)
+	signal.Notify(sigChan, syscall.SIGTERM)
 
 	// reading from a channel will block until message is consumed
 	// once the message is consumed, server is shutdown
