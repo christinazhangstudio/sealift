@@ -20,6 +20,20 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
+// AI configuration loaded from environment variables.
+// All self-hosted AI and related settings are declared here for easy consolidation.
+var (
+	selfHostedEmbeddingURL           = os.Getenv("SELF_HOSTED_EMBEDDING_URL")
+	selfHostedEmbeddingModel         = os.Getenv("SELF_HOSTED_EMBEDDING_MODEL")
+	aiSimilarityThreshold            = os.Getenv("AI_SIMILARITY_THRESHOLD")
+	openAIAPIKey                     = os.Getenv("OPENAI_API_KEY")
+	useSelfHostedAI                  = os.Getenv("USE_SELF_HOSTED_AI")
+	openAIBaseURL                    = os.Getenv("OPENAI_BASE_URL")
+	groqAIModel                      = os.Getenv("GROQ_AI_MODEL")
+	selfHostedAIChatCompletionsURL   = os.Getenv("SELF_HOSTED_AI_CHAT_COMPLETIONS_URL")
+	selfHostedAIChatCompletionsModel = os.Getenv("SELF_HOSTED_AI_CHAT_COMPLETIONS_MODEL")
+)
+
 type KnowledgeChunk struct {
 	ID        primitive.ObjectID `bson:"_id,omitempty" json:"id"`
 	Source    string             `bson:"source" json:"source"`
@@ -57,9 +71,9 @@ func (s *Server) handleAIIngest(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			embedding, err := getOllamaEmbedding(text)
+			embedding, err := getEmbedding(text)
 			if err != nil {
-				slog.Warn("Failed to get embedding from Ollama", "err", err)
+				slog.Warn("Failed to get embedding", "err", err)
 				continue
 			}
 
@@ -96,7 +110,7 @@ func (s *Server) handleAIAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	history := r.URL.Query().Get("history") // Conversation history for LLM context only
 
-	simThresholdStr := os.Getenv("AI_SIMILARITY_THRESHOLD")
+	simThresholdStr := aiSimilarityThreshold
 	var simThreshold float32 = 0.30 // Default threshold
 	if simThresholdStr != "" {
 		if val, err := strconv.ParseFloat(simThresholdStr, 32); err == nil {
@@ -105,7 +119,7 @@ func (s *Server) handleAIAsk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 1. Get embedding for the user question
-	queryEmbedding, err := getOllamaEmbedding(query)
+	queryEmbedding, err := getEmbedding(query)
 	if err != nil {
 		slog.Error("Failed to embed query", "err", err)
 		http.Error(w, "AI service unavailable", http.StatusInternalServerError)
@@ -235,26 +249,31 @@ func (s *Server) handleAIAsk(w http.ResponseWriter, r *http.Request) {
 
 // --- AI Helper Functions ---
 
-func getOllamaEmbedding(text string) ([]float32, error) {
-	baseUrl := ollamaURL
-	if baseUrl == "" {
-		baseUrl = "http://localhost:11434"
+func getEmbedding(text string) ([]float32, error) {
+	if selfHostedEmbeddingURL == "" {
+		return nil, errors.New("SELF_HOSTED_EMBEDDING_URL is required (set SELF_HOSTED_EMBEDDING_URL and SELF_HOSTED_EMBEDDING_MODEL to use your self-hosted embeddings endpoint)")
 	}
-	url := fmt.Sprintf("%s/api/embeddings", baseUrl)
-	// Nomic Embed Text strictly requires explicit task prefixes to mathematically align vectors for retrieval
-	queryText := text
-	if !strings.HasPrefix(queryText, "search_query: ") {
-		queryText = "search_query: " + queryText
+	return getOpenAICompatibleEmbedding(text)
+}
+
+// getOpenAICompatibleEmbedding calls an OpenAI-compatible embeddings endpoint.
+// Set SELF_HOSTED_EMBEDDING_URL to the full target URL you want to POST to
+// (e.g. http://192.168.1.157:8080/v1/embeddings or a custom path your server exposes).
+func getOpenAICompatibleEmbedding(text string) ([]float32, error) {
+	if selfHostedEmbeddingModel == "" {
+		return nil, errors.New("SELF_HOSTED_EMBEDDING_MODEL must be set when using SELF_HOSTED_EMBEDDING_URL")
 	}
 
+	url := strings.TrimRight(selfHostedEmbeddingURL, "/")
+	slog.Info("Using self-hosted embedding endpoint", "url", url)
+
 	payload := map[string]interface{}{
-		"model":  "nomic-embed-text",
-		"prompt": queryText,
+		"model": selfHostedEmbeddingModel,
+		"input": text,
 	}
 
 	body, _ := json.Marshal(payload)
 
-	// Create client with timeout specifically for Ollama
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Post(url, "application/json", strings.NewReader(string(body)))
 	if err != nil {
@@ -263,17 +282,24 @@ func getOllamaEmbedding(text string) ([]float32, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama returned status %d", resp.StatusCode)
+		bodyText, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("embedding endpoint returned status %d: %s", resp.StatusCode, string(bodyText))
 	}
 
 	var result struct {
-		Embedding []float32 `json:"embedding"`
+		Data []struct {
+			Embedding []float32 `json:"embedding"`
+		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
 
-	return result.Embedding, nil
+	if len(result.Data) == 0 {
+		return nil, errors.New("no embedding data returned")
+	}
+
+	return result.Data[0].Embedding, nil
 }
 
 func getCompletion(query string, contextText string, isCasual bool) (string, error) {
@@ -284,29 +310,31 @@ func getCompletion(query string, contextText string, isCasual bool) (string, err
 		prompt = loadPromptTemplate("prompts/rag.txt", map[string]string{"Query": query, "Context": contextText})
 	}
 
-	cloudKey := os.Getenv("OPENAI_API_KEY")
-	useSelfHosted := os.Getenv("USE_SELF_HOSTED_AI") == "true"
+	cloudKey := openAIAPIKey
+	useSelfHosted := useSelfHostedAI == "true"
 
 	// Either Self-Hosted OpenAI-compatible or Groq Cloud
 	if cloudKey != "" || useSelfHosted {
-		baseURL := os.Getenv("OPENAI_BASE_URL")
+		baseURL := openAIBaseURL
 		if baseURL == "" {
 			baseURL = "https://api.groq.com/openai/v1/chat/completions" // Groq cloud is extremely fast & has a free tier for Llama 3
+		} else {
+			baseURL = strings.TrimRight(baseURL, "/")
 		}
-		model := os.Getenv("GROQ_AI_MODEL")
+		model := groqAIModel
 
 		// OVERRIDE for Self-Hosted Endpoint
 		if useSelfHosted {
-			selfHostedURL := os.Getenv("SELF_HOSTED_AI_URL")
+			selfHostedURL := selfHostedAIChatCompletionsURL
 			if selfHostedURL != "" {
-				baseURL = selfHostedURL
+				baseURL = strings.TrimRight(selfHostedURL, "/")
 			} else {
-				return "", errors.New("SELF_HOSTED_AI_URL must be provided when USE_SELF_HOSTED_AI is true")
+				return "", errors.New("SELF_HOSTED_AI_CHAT_COMPLETIONS_URL must be provided when USE_SELF_HOSTED_AI is true")
 			}
 
-			model = os.Getenv("SELF_HOSTED_AI_MODEL")
+			model = selfHostedAIChatCompletionsModel
 			if model == "" {
-				return "", errors.New("SELF_HOSTED_AI_MODEL must be provided when USE_SELF_HOSTED_AI is true")
+				return "", errors.New("SELF_HOSTED_AI_CHAT_COMPLETIONS_MODEL must be provided when USE_SELF_HOSTED_AI is true")
 			}
 		}
 
@@ -324,7 +352,9 @@ func getCompletion(query string, contextText string, isCasual bool) (string, err
 
 		client := &http.Client{Timeout: 300 * time.Second} // Long timeout for heavy self-hosted responses
 		req, _ := http.NewRequest("POST", baseURL, strings.NewReader(string(body)))
-		req.Header.Set("Authorization", "Bearer "+cloudKey)
+		if cloudKey != "" {
+			req.Header.Set("Authorization", "Bearer "+cloudKey)
+		}
 		req.Header.Set("Content-Type", "application/json")
 
 		if useSelfHosted {
@@ -361,37 +391,7 @@ func getCompletion(query string, contextText string, isCasual bool) (string, err
 		return "", errors.New("invalid response from AI endpoint")
 	}
 
-	// Fallback to local Ollama
-	baseUrl := ollamaURL
-	if baseUrl == "" {
-		baseUrl = "http://localhost:11434"
-	}
-	url := fmt.Sprintf("%s/api/generate", baseUrl)
-
-	payload := map[string]interface{}{
-		"model":  "llama3",
-		"prompt": prompt,
-		"stream": false,
-	}
-
-	body, _ := json.Marshal(payload)
-
-	// Custom client with long timeout for generation
-	client := &http.Client{Timeout: 300 * time.Second}
-	resp, err := client.Post(url, "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Response string `json:"response"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
-	}
-
-	return result.Response, nil
+	return "", errors.New("no AI provider configured: set USE_SELF_HOSTED_AI + SELF_HOSTED_AI_CHAT_COMPLETIONS_URL (or OPENAI_API_KEY / GROQ_AI_MODEL)")
 }
 
 func cosineSimilarity(a, b []float32) float32 {

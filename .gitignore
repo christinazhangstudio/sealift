@@ -3,4 +3,5 @@ deploy/
 prompts/
 docs/
 run.ps1
+run.sh
 *omit.md

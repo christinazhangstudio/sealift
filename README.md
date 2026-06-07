@@ -91,9 +91,6 @@ if Atlas is down or slow, it instantly falls back to searching the local DB,
 which uses local manual search to fetch *every* documentation chunk first,
 and then run cosine similarity again to find the most relevant chunk.
 
-```
-[System.Environment]::SetEnvironmentVariable('OLLAMA_HOST', '0.0.0.0', 'User')
-```
 **ingestion**: `/ai/ingest` saves docs under `/docs` to both Cloud Atlas and the local DB.
 
 ```
@@ -108,19 +105,19 @@ sealift uses both *local*, computationally-inexpensive components (embeddings an
 sequenceDiagram
     participant Frontend as Frontend
     participant Backend as Go Backend (/ai/ask)
-    participant Ollama as Local Ollama
+    participant Embeddings as Embeddings Service
     participant Atlas as MongoDB Atlas Cloud
     participant LocalDB as MongoDB Local Fallback
-    participant SelfHosted as Self-Hosted AI (Qwen2.5)
+    participant SelfHosted as Self-Hosted AI
     participant Groq as Groq Cloud API
 
     Frontend->>Backend: user asks question (q + history)
     
     rect rgba(128,128,128,0.08)
-        Note over Backend,Ollama: 1. Vectorization Layer
-        Backend->>Ollama: generate embeddings (nomic-embed-text)
+        Note over Backend,Embeddings: 1. Vectorization Layer
+        Backend->>Embeddings: generate embeddings
         Note right of Backend: only embeds q, not history
-        Ollama-->>Backend: return Float32 vector
+        Embeddings-->>Backend: return Float32 vector
     end
 
     rect rgba(128,128,128,0.08)
@@ -147,7 +144,7 @@ sequenceDiagram
         end
 
         alt USE_SELF_HOSTED_AI=true
-            Backend->>SelfHosted: request generation (SELF_HOSTED_AI_MODEL)
+            Backend->>SelfHosted: request generation (SELF_HOSTED_AI_CHAT_COMPLETIONS_MODEL)
             SelfHosted-->>Backend: response
         else Groq Cloud
             Backend->>Groq: request generation (GROQ_AI_MODEL)
@@ -159,10 +156,10 @@ sequenceDiagram
     Frontend->>Frontend: display answer to user
 ```
 
-**1. Vectorization (local)**
-* **model:** `nomic-embed-text` (tiny (~200MB) and inherently stateless)
+**1. Vectorization**
+Embeddings are provided by a configured OpenAI-compatible service.
 
-when a query is submitted, the Go backend asks local Ollama to turn the text into a vector. importantly, only the new question (`q`) is embedded; conversation history is kept separate in order not to pollute vector similarity scores.
+Only the new question (`q`) is embedded; conversation history is kept separate in order not to pollute vector similarity scores.
 
 **2. Storage & Fallback Retrieval (Cloud + local)**
 * **primary DB:** MongoDB Atlas (`$vectorSearch`)
@@ -171,7 +168,16 @@ when a query is submitted, the Go backend asks local Ollama to turn the text int
 the Go backend compares the mathematical distance between the query vector and the documentation chunk vectors. to prevent hallucination, it filters out any chunks that have a similarity score less than the `AI_SIMILARITY_THRESHOLD`, both locally and on Atlas. 
 
 **3. Decision & Generation (self-hosted || Cloud)**
-* **self-hosted:** configurable via `USE_SELF_HOSTED_AI`, `SELF_HOSTED_AI_URL`, `SELF_HOSTED_AI_MODEL`
+* **self-hosted:** configurable via `USE_SELF_HOSTED_AI`, `SELF_HOSTED_AI_CHAT_COMPLETIONS_URL`, `SELF_HOSTED_AI_CHAT_COMPLETIONS_MODEL`
 * **cloud:** Groq API via `GROQ_AI_MODEL`
 
-if no results meet the similarity threshold AND there is no conversation history, the backend flags the conversation as `isCasualChat` and loads `prompts/casual.txt`. otherwise, it loads `prompts/rag.txt` and injects both doc context and conversation history, letting the LLM itself decide relevance. prompt templates are mounted as files and can be edited without rebuilding the Docker image.
+Embeddings require `SELF_HOSTED_EMBEDDING_URL` and `SELF_HOSTED_EMBEDDING_MODEL` (OpenAI-compatible `/v1/embeddings` endpoint). 
+
+Example:
+
+```
+SELF_HOSTED_EMBEDDING_URL=http://192.168.1.157:8080
+SELF_HOSTED_EMBEDDING_MODEL=your-embedding-model
+```
+
+The backend calls `SELF_HOSTED_EMBEDDING_URL/v1/embeddings`.
