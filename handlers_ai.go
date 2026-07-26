@@ -266,7 +266,7 @@ func (s *Server) handleAIAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	answer, err := getCompletion(query, llmContext, isCasualChat)
+	answer, thinking, err := getCompletion(query, llmContext, isCasualChat)
 	if err != nil {
 		slog.Error("failed to generate answer", "err", err)
 		http.Error(w, "Failed to generate answer; AI server temporarily down?", http.StatusInternalServerError)
@@ -274,9 +274,10 @@ func (s *Server) handleAIAsk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"query":   query,
-		"answer":  answer,
-		"sources": chunks,
+		"query":    query,
+		"answer":   answer,
+		"thinking": thinking,
+		"sources":  chunks,
 	})
 }
 
@@ -335,7 +336,9 @@ func getOpenAICompatibleEmbedding(text string) ([]float32, error) {
 	return result.Data[0].Embedding, nil
 }
 
-func getCompletion(query string, contextText string, isCasual bool) (string, error) {
+// getCompletion returns the model's answer plus any reasoning/thinking text
+// (from reasoning_content, or extracted from inline <think> tags).
+func getCompletion(query string, contextText string, isCasual bool) (string, string, error) {
 	var prompt string
 	if isCasual {
 		prompt = loadPromptTemplate("prompts/casual.txt", map[string]string{"Query": query})
@@ -362,17 +365,17 @@ func getCompletion(query string, contextText string, isCasual bool) (string, err
 			if selfHostedURL != "" {
 				baseURL = strings.TrimRight(selfHostedURL, "/")
 			} else {
-				return "", errors.New("SELF_HOSTED_AI_CHAT_COMPLETIONS_URL must be provided when USE_SELF_HOSTED_AI is true")
+				return "", "", errors.New("SELF_HOSTED_AI_CHAT_COMPLETIONS_URL must be provided when USE_SELF_HOSTED_AI is true")
 			}
 
 			model = selfHostedAIChatCompletionsModel
 			if model == "" {
-				return "", errors.New("SELF_HOSTED_AI_CHAT_COMPLETIONS_MODEL must be provided when USE_SELF_HOSTED_AI is true")
+				return "", "", errors.New("SELF_HOSTED_AI_CHAT_COMPLETIONS_MODEL must be provided when USE_SELF_HOSTED_AI is true")
 			}
 		}
 
 		if model == "" {
-			return "", errors.New("GROQ_AI_MODEL must be explicitly provided when using the Cloud API")
+			return "", "", errors.New("GROQ_AI_MODEL must be explicitly provided when using the Cloud API")
 		}
 
 		payload := map[string]interface{}{
@@ -380,6 +383,11 @@ func getCompletion(query string, contextText string, isCasual bool) (string, err
 			"messages": []map[string]string{
 				{"role": "user", "content": prompt},
 			},
+		}
+		if useSelfHosted {
+			// Hybrid-reasoning models (Qwen 3.x) only think when the chat template
+			// enables it; llama-server then returns reasoning_content separately.
+			payload["chat_template_kwargs"] = map[string]any{"enable_thinking": true}
 		}
 		body, _ := json.Marshal(payload)
 
@@ -398,33 +406,43 @@ func getCompletion(query string, contextText string, isCasual bool) (string, err
 
 		resp, err := client.Do(req)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
 			bodyText, _ := io.ReadAll(resp.Body)
-			return "", fmt.Errorf("AI endpoint returned status %d: %s", resp.StatusCode, string(bodyText))
+			return "", "", fmt.Errorf("AI endpoint returned status %d: %s", resp.StatusCode, string(bodyText))
 		}
 
 		var result struct {
 			Choices []struct {
 				Message struct {
-					Content string `json:"content"`
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
 				} `json:"message"`
 			} `json:"choices"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return "", err
+			return "", "", err
 		}
 		if len(result.Choices) > 0 {
-			slog.Info("processed AI response", "response", resp, "body", resp.Body)
-			return result.Choices[0].Message.Content, nil
+			answer := result.Choices[0].Message.Content
+			thinking := result.Choices[0].Message.ReasoningContent
+			if thinking == "" {
+				// Some server configs leave <think> blocks inline in the content
+				var f thinkTagFilter
+				t1, c1 := f.feed(answer)
+				t2, c2 := f.flush()
+				thinking = t1 + t2
+				answer = strings.TrimSpace(c1 + c2)
+			}
+			return answer, thinking, nil
 		}
-		return "", errors.New("invalid response from AI endpoint")
+		return "", "", errors.New("invalid response from AI endpoint")
 	}
 
-	return "", errors.New("no AI provider configured: set USE_SELF_HOSTED_AI + SELF_HOSTED_AI_CHAT_COMPLETIONS_URL (or OPENAI_API_KEY / GROQ_AI_MODEL)")
+	return "", "", errors.New("no AI provider configured: set USE_SELF_HOSTED_AI + SELF_HOSTED_AI_CHAT_COMPLETIONS_URL (or OPENAI_API_KEY / GROQ_AI_MODEL)")
 }
 
 // mustJSON is a tiny helper for SSE event payloads.
@@ -434,6 +452,69 @@ func mustJSON(v any) string {
 		return `{"error":"json marshal failed"}`
 	}
 	return string(b)
+}
+
+// thinkTagFilter splits a token stream that may contain inline <think>...</think>
+// blocks (servers configured without reasoning extraction) into thinking vs content.
+// Tags can be split across streamed deltas, so a small carry buffer holds anything
+// that could be the start of a tag until the next delta resolves it.
+type thinkTagFilter struct {
+	inThink bool
+	carry   string
+}
+
+func (f *thinkTagFilter) feed(s string) (thinking, content string) {
+	buf := f.carry + s
+	f.carry = ""
+	for {
+		if f.inThink {
+			if idx := strings.Index(buf, "</think>"); idx >= 0 {
+				thinking += buf[:idx]
+				buf = buf[idx+len("</think>"):]
+				f.inThink = false
+				continue
+			}
+			hold := partialTagSuffix(buf, "</think>")
+			thinking += buf[:len(buf)-hold]
+			f.carry = buf[len(buf)-hold:]
+			return thinking, content
+		}
+		if idx := strings.Index(buf, "<think>"); idx >= 0 {
+			content += buf[:idx]
+			buf = buf[idx+len("<think>"):]
+			f.inThink = true
+			continue
+		}
+		hold := partialTagSuffix(buf, "<think>")
+		content += buf[:len(buf)-hold]
+		f.carry = buf[len(buf)-hold:]
+		return thinking, content
+	}
+}
+
+// flush drains whatever is left in the carry buffer at end of stream.
+func (f *thinkTagFilter) flush() (thinking, content string) {
+	rest := f.carry
+	f.carry = ""
+	if f.inThink {
+		return rest, ""
+	}
+	return "", rest
+}
+
+// partialTagSuffix returns the length of the longest suffix of s that is a
+// strict prefix of tag (i.e. a tag possibly cut off mid-delta).
+func partialTagSuffix(s, tag string) int {
+	max := len(tag) - 1
+	if len(s) < max {
+		max = len(s)
+	}
+	for l := max; l > 0; l-- {
+		if strings.HasPrefix(tag, s[len(s)-l:]) {
+			return l
+		}
+	}
+	return 0
 }
 
 // streamCompletion streams tokens from the upstream OpenAI-compatible endpoint
@@ -493,6 +574,11 @@ func streamCompletion(
 			{"role": "user", "content": prompt},
 		},
 	}
+	if useSelfHosted {
+		// Hybrid-reasoning models (Qwen 3.x) only think when the chat template
+		// enables it; llama-server then streams reasoning_content deltas.
+		payload["chat_template_kwargs"] = map[string]any{"enable_thinking": true}
+	}
 	body, _ := json.Marshal(payload)
 
 	client := &http.Client{Timeout: 10 * time.Minute} // allow long-running model generations
@@ -519,6 +605,10 @@ func streamCompletion(
 	// Use a larger buffer for the scanner in case of large SSE events or slow token streams.
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // up to 1MB per line/event
+
+	// Splits inline <think>...</think> out of content deltas for server configs
+	// that don't extract reasoning into reasoning_content themselves.
+	var contentFilter thinkTagFilter
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -557,10 +647,28 @@ func streamCompletion(
 				flusher.Flush()
 			}
 			if delta.Content != "" {
-				fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]string{"token": delta.Content}))
-				flusher.Flush()
+				thinkPart, contentPart := contentFilter.feed(delta.Content)
+				if thinkPart != "" {
+					fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]string{"thinking": thinkPart}))
+					flusher.Flush()
+				}
+				if contentPart != "" {
+					fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]string{"token": contentPart}))
+					flusher.Flush()
+				}
 			}
 		}
+	}
+
+	// Drain anything the think-tag filter was still holding back
+	if thinkPart, contentPart := contentFilter.flush(); thinkPart != "" || contentPart != "" {
+		if thinkPart != "" {
+			fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]string{"thinking": thinkPart}))
+		}
+		if contentPart != "" {
+			fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]string{"token": contentPart}))
+		}
+		flusher.Flush()
 	}
 
 	// Final event with sources so the client can attach citations
@@ -589,6 +697,26 @@ func cosineSimilarity(a, b []float32) float32 {
 	return dotProduct / (float32(math.Sqrt(float64(normA))) * float32(math.Sqrt(float64(normB))))
 }
 
+// defaultPromptTemplates are the built-in fallbacks used when the prompts/
+// directory is missing or a template file is empty. Without these an absent
+// template would send the model an EMPTY prompt — the user's query never
+// reaches the model at all and it free-associates.
+var defaultPromptTemplates = map[string]string{
+	"prompts/casual.txt": `You are the Sealift AI assistant. Sealift is a marketplace management dashboard for eBay sellers (listings, payouts, transaction summaries, notifications, and sticky notes).
+
+Answer the user's message conversationally and concisely. If you are not sure about something, say so honestly instead of guessing.
+
+User message:
+{{.Query}}`,
+	"prompts/rag.txt": `You are the Sealift AI documentation assistant. Sealift is a marketplace management dashboard for eBay sellers. Use the provided context to answer the user's question. If the context does not contain the answer, say you don't know. Answer concisely and cite source names when helpful.
+
+Context:
+{{.Context}}
+
+User question:
+{{.Query}}`,
+}
+
 // loadPromptTemplate reads a prompt template from a file path, falling back to a hardcoded default.
 // Templates use Go text/template syntax: {{.Query}}, {{.Context}}, etc.
 func loadPromptTemplate(filePath string, data map[string]string) string {
@@ -597,7 +725,15 @@ func loadPromptTemplate(filePath string, data map[string]string) string {
 		tmplText = string(content)
 		slog.Debug("Loaded prompt template from file", "path", filePath)
 	} else {
-		slog.Debug("Using default prompt template", "path", filePath, "reason", err.Error())
+		slog.Debug("Prompt template file unavailable", "path", filePath, "reason", err.Error())
+	}
+
+	if strings.TrimSpace(tmplText) == "" {
+		tmplText = defaultPromptTemplates[filePath]
+		if tmplText == "" {
+			tmplText = "{{.Query}}" // last resort: at least pass the query through
+		}
+		slog.Debug("Using default prompt template", "path", filePath)
 	}
 
 	tmpl, err := template.New("prompt").Parse(tmplText)
