@@ -70,7 +70,9 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	newTenantID := result.InsertedID.(primitive.ObjectID).Hex()
 	slog.Info("created new Sealift tenant", "tenantID", newTenantID)
 
-	// Create tenant-level notification destination immediately
+	// Create tenant-level notification destination immediately. If this fails
+	// it is not fatal: subscribing later re-creates the destination on demand
+	// (see ensureTenantDestination).
 	go func(tenantID string) {
 		slog.Info("registering tenant-level notification destination", "tenantID", tenantID)
 		dynamicClient, _, err := s.getEbayClientForUser(context.Background(), tenantID)
@@ -79,18 +81,8 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// We use the tenantID as the "name" for the destination for easier tracking
-		destCtx := context.WithValue(context.Background(), auth.USER, tenantID)
-		destinationURL := fmt.Sprintf("%s/tenant/%s", endpointURL, tenantID)
-
-		destID, err := dynamicClient.CreateDestination(destCtx, destinationURL, verificationToken)
-		if err != nil {
-			slog.Warn("failed to create destination", "err", err, "url", destinationURL)
-		} else {
-			slog.Info("successfully created tenant notification destination", "tenantID", tenantID, "destID", destID)
-			// Store the destination ID on the tenant record
-			objID, _ := primitive.ObjectIDFromHex(tenantID)
-			s.sealiftUsersCol.UpdateOne(context.Background(), bson.M{"_id": objID}, bson.M{"$set": bson.M{"destinationID": destID}})
+		if _, err := s.ensureTenantDestination(context.Background(), dynamicClient, tenantID); err != nil {
+			slog.Warn("failed to create destination; will retry on first subscribe", "err", err, "tenantID", tenantID)
 		}
 	}(newTenantID)
 

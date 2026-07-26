@@ -68,9 +68,10 @@ type NotificationPayload struct {
 		PublishDate    string `json:"publishDate"`
 		PublishAttempt int    `json:"publishAttempt"`
 		Data           struct {
-			SenderUserName string `json:"senderUserName"`
-			MessageBody    string `json:"messageBody"`
-			Subject        string `json:"subject"`
+			SenderUserName    string `json:"senderUserName"`
+			RecipientUserName string `json:"recipientUserName"`
+			MessageBody       string `json:"messageBody"`
+			Subject           string `json:"subject"`
 		} `json:"data"`
 	} `json:"notification"`
 }

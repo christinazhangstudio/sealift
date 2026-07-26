@@ -21,6 +21,10 @@ import (
 	"strings"
 	"sync"
 
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+
 	"github.tesla.com/chrzhang/sealift/api"
 	"github.tesla.com/chrzhang/sealift/auth"
 	"github.tesla.com/chrzhang/sealift/ebay"
@@ -204,8 +208,22 @@ func (s *Server) handleCreateSubscription(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Self-heal: the destination is otherwise only ever created by a
+	// fire-and-forget goroutine at registration, so a tenant whose one attempt
+	// failed could never subscribe to anything again.
+	destinationID := sealiftUser.DestinationID
+	if destinationID == "" {
+		slog.Warn("tenant has no notification destination; creating one now", "tenantID", userID)
+		destinationID, err = s.ensureTenantDestination(r.Context(), dynamicClient, userID)
+		if err != nil {
+			slog.Error("failed to create tenant destination", "err", err, "tenantID", userID)
+			http.Error(w, "Could not create notification destination; please try again", http.StatusInternalServerError)
+			return
+		}
+	}
+
 	userCtx := context.WithValue(r.Context(), auth.USER, user)
-	subID, err := dynamicClient.CreateUserSubscription(userCtx, req.TopicID, sealiftUser.DestinationID)
+	subID, err := dynamicClient.CreateUserSubscription(userCtx, req.TopicID, destinationID)
 	if err != nil {
 		slog.Error("failed to create subscription", "err", err, "user", user)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -389,17 +407,42 @@ func (s *Server) handleNotificationWebhook(w http.ResponseWriter, r *http.Reques
 			return
 		}
 
-		// Route to the correct eBay store's inbox
-		ebayUser := payload.Notification.Data.SenderUserName
+		// Route to the correct eBay store's inbox.
+		//
+		// The seller may be either party: on an inbound buyer message the seller
+		// is recipientUserName, and on a seller reply it's senderUserName.
+		// Match both against this tenant's registered sellers so the message
+		// always lands in the store's inbox — routing blindly by sender filed
+		// every buyer message under the buyer, where no seller inbox reads it.
+		recipient := payload.Notification.Data.RecipientUserName
+		sender := payload.Notification.Data.SenderUserName
+
+		ebayUser := s.resolveInboxOwner(r.Context(), tenantID, recipient, sender)
 		if ebayUser == "" {
-			slog.Error("Webhook error: missing sender username in payload")
+			slog.Error("Webhook error: no inbox owner in payload",
+				"tenantID", tenantID, "recipient", recipient, "sender", sender,
+				"topic", payload.Metadata.Topic)
 			http.Error(w, "Missing Sender", http.StatusBadRequest)
 			return
 		}
 
 		var notif map[string]interface{}
-		json.Unmarshal(reqBody, &notif)
-		s.inboxReceiver.PushNotification(r.Context(), ebayUser, notif)
+		if err := json.Unmarshal(reqBody, &notif); err != nil {
+			slog.Error("failed to decode payload into map", "err", err)
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		// Return 5xx on storage failure so eBay retries; swallowing the error
+		// and replying 200 silently loses the notification forever.
+		if err := s.inboxReceiver.PushNotification(r.Context(), ebayUser, notif); err != nil {
+			slog.Error("failed to store notification", "err", err, "user", ebayUser, "tenantID", tenantID)
+			http.Error(w, "Failed to store notification", http.StatusInternalServerError)
+			return
+		}
+
+		slog.Info("stored notification", "user", ebayUser, "topic", payload.Metadata.Topic,
+			"notificationId", payload.Notification.NotificationID)
 
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, "OK")
@@ -407,6 +450,64 @@ func (s *Server) handleNotificationWebhook(w http.ResponseWriter, r *http.Reques
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// ensureTenantDestination creates the tenant's notification destination and
+// persists its ID, returning the new destination ID. Used to recover tenants
+// whose registration-time creation failed (see handleRegisterUser).
+func (s *Server) ensureTenantDestination(ctx context.Context, client *ebay.Client, tenantID string) (string, error) {
+	destCtx := context.WithValue(ctx, auth.USER, tenantID)
+	destinationURL := fmt.Sprintf("%s/tenant/%s", endpointURL, tenantID)
+
+	destID, err := client.CreateDestination(destCtx, destinationURL, verificationToken)
+	if err != nil {
+		return "", fmt.Errorf("create destination %s; %w", destinationURL, err)
+	}
+
+	objID, err := primitive.ObjectIDFromHex(tenantID)
+	if err != nil {
+		return "", fmt.Errorf("invalid tenant id %s; %w", tenantID, err)
+	}
+	if _, err := s.sealiftUsersCol.UpdateOne(ctx,
+		bson.M{"_id": objID},
+		bson.M{"$set": bson.M{"destinationID": destID}},
+	); err != nil {
+		return "", fmt.Errorf("persist destination id; %w", err)
+	}
+
+	slog.Info("created tenant notification destination", "tenantID", tenantID, "destID", destID)
+	return destID, nil
+}
+
+// resolveInboxOwner picks which party in a notification owns the inbox it
+// belongs in: whichever of the candidates is a seller registered to this
+// tenant. Falls back to the first non-empty candidate so unrecognized
+// payloads are still stored rather than dropped.
+func (s *Server) resolveInboxOwner(ctx context.Context, tenantID string, candidates ...string) string {
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		err := s.ebayAccountsCol.FindOne(ctx, bson.M{
+			"user":            candidate,
+			"sealift_user_id": tenantID,
+		}).Err()
+		if err == nil {
+			return candidate
+		}
+		if err != mongo.ErrNoDocuments {
+			slog.Warn("inbox owner lookup failed", "err", err, "candidate", candidate)
+		}
+	}
+
+	for _, candidate := range candidates {
+		if candidate != "" {
+			slog.Warn("no registered seller in notification; storing under fallback",
+				"fallback", candidate, "tenantID", tenantID)
+			return candidate
+		}
+	}
+	return ""
 }
 
 // handleDeletionWebhook handles the required webhook for deletion events.
