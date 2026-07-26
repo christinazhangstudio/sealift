@@ -68,15 +68,14 @@ func (r *Receiver) PushNotification(
 	user string,
 	notif map[string]interface{},
 ) error {
-	var createdAt time.Time
+	// Fall back to now rather than dropping the notification: an unparseable
+	// (or absent) eventDate is not a reason to lose the message entirely.
+	createdAt := time.Now().UTC()
 	if notifInfo, ok := notif["notification"].(map[string]interface{}); ok {
 		if eventDateStr, ok := notifInfo["eventDate"].(string); ok {
-			parsedTime, err := time.Parse(time.RFC3339, eventDateStr)
-			if err != nil {
-				return fmt.Errorf("failed to parse eventDate from notification payload: %w", err)
+			if parsedTime, err := time.Parse(time.RFC3339, eventDateStr); err == nil {
+				createdAt = parsedTime
 			}
-
-			createdAt = parsedTime
 		}
 	}
 
