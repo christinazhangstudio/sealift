@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rsa"
+	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -474,10 +475,26 @@ func (s *Server) handleDeletionWebhook(w http.ResponseWriter, r *http.Request) {
 
 // --- eBay Signature Verification ---
 
+// cachedEbayKey pairs the parsed public key with the digest eBay advertises for
+// it ("SHA1" in practice) — signatures are made over that digest, not SHA-256.
+type cachedEbayKey struct {
+	key    interface{}
+	digest string
+}
+
 var (
-	ebayKeyCache = make(map[string]interface{})
+	ebayKeyCache = make(map[string]cachedEbayKey)
 	ebayKeyMutex sync.RWMutex
 )
+
+// normalizePEM rewraps a public key for pem.Decode. eBay's getPublicKey returns
+// the PEM as a single line with no newlines after the header/footer, which
+// pem.Decode rejects — every webhook then failed signature verification.
+func normalizePEM(key string) string {
+	key = strings.ReplaceAll(key, "-----BEGIN PUBLIC KEY-----", "")
+	key = strings.ReplaceAll(key, "-----END PUBLIC KEY-----", "")
+	return "-----BEGIN PUBLIC KEY-----\n" + strings.TrimSpace(key) + "\n-----END PUBLIC KEY-----"
+}
 
 // verifyEbaySignature actively checks the X-Ebay-Signature header to ensure webhooks originated from eBay.
 func verifyEbaySignature(r *http.Request, reqBody []byte, client *ebay.Client) error {
@@ -511,7 +528,7 @@ func verifyEbaySignature(r *http.Request, reqBody []byte, client *ebay.Client) e
 
 	// 1. Check Memory Cache for Public Key
 	ebayKeyMutex.RLock()
-	pubKey, exists := ebayKeyCache[sigData.Kid]
+	cached, exists := ebayKeyCache[sigData.Kid]
 	ebayKeyMutex.RUnlock()
 
 	// 2. Get Public Key if missing
@@ -522,7 +539,7 @@ func verifyEbaySignature(r *http.Request, reqBody []byte, client *ebay.Client) e
 			return fmt.Errorf("failed to get public key %s from ebay: %v", sigData.Kid, err)
 		}
 
-		block, _ := pem.Decode([]byte(pubKeyResp.Key))
+		block, _ := pem.Decode([]byte(normalizePEM(pubKeyResp.Key)))
 		if block == nil {
 			return errors.New("failed to decode PEM block containing public key")
 		}
@@ -534,27 +551,40 @@ func verifyEbaySignature(r *http.Request, reqBody []byte, client *ebay.Client) e
 
 		// Cache it
 		ebayKeyMutex.Lock()
-		ebayKeyCache[sigData.Kid] = parsedKey
-		pubKey = parsedKey
+		cached = cachedEbayKey{key: parsedKey, digest: strings.ToUpper(pubKeyResp.Digest)}
+		ebayKeyCache[sigData.Kid] = cached
 		ebayKeyMutex.Unlock()
-		slog.Info("Successfully cached new eBay Public Key", "kid", sigData.Kid)
+		slog.Info("Successfully cached new eBay Public Key", "kid", sigData.Kid, "algorithm", pubKeyResp.Algorithm, "digest", pubKeyResp.Digest)
+	}
+
+	// eBay signs over the digest advertised with the key (SHA1 in practice),
+	// not necessarily SHA-256.
+	var hashed []byte
+	var hashAlg crypto.Hash
+	switch cached.digest {
+	case "SHA1":
+		h := sha1.Sum(reqBody)
+		hashed = h[:]
+		hashAlg = crypto.SHA1
+	default:
+		h := sha256.Sum256(reqBody)
+		hashed = h[:]
+		hashAlg = crypto.SHA256
 	}
 
 	// 3. Cryptographically Verify Signature
 	// eBay supports ECDSA, ED25519, and RSA
-	switch pub := pubKey.(type) {
+	switch pub := cached.key.(type) {
 	case ed25519.PublicKey:
 		if !ed25519.Verify(pub, reqBody, decodedSignature) {
 			return errors.New("Ed25519 signature verification failed")
 		}
 	case *ecdsa.PublicKey:
-		hash := sha256.Sum256(reqBody)
-		if !ecdsa.VerifyASN1(pub, hash[:], decodedSignature) {
+		if !ecdsa.VerifyASN1(pub, hashed, decodedSignature) {
 			return errors.New("ECDSA signature verification failed")
 		}
 	case *rsa.PublicKey:
-		hash := sha256.Sum256(reqBody)
-		if err := rsa.VerifyPKCS1v15(pub, crypto.SHA256, hash[:], decodedSignature); err != nil {
+		if err := rsa.VerifyPKCS1v15(pub, hashAlg, hashed, decodedSignature); err != nil {
 			return fmt.Errorf("RSA signature verification failed: %v", err)
 		}
 	default:
