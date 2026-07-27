@@ -94,6 +94,12 @@ func main() {
 		Options: options.Index().SetExpireAfterSeconds(int32(24 * 60 * 60)),
 	})
 
+	// OAuth state tokens are single-use and short-lived; expire leftovers.
+	_, _ = mongoDB.Collection("oauth_states").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "createdAt", Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(int32(15 * 60)),
+	})
+
 	sharedClient := &http.Client{Timeout: time.Second * 30}
 
 	inboxCollection := mongoDB.Collection("inbox")
@@ -111,6 +117,7 @@ func main() {
 		revokedTokensCol:      mongoDB.Collection("revoked_tokens"),
 		knowledgeBaseLocalCol: mongoDB.Collection("knowledge_base"),
 		knowledgeBaseAtlasCol: mongoKnowledgeBaseAtlas,
+		oauthStatesCol:        mongoDB.Collection("oauth_states"),
 	}
 
 	srv.registerRoutes()

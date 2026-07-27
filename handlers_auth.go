@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -26,6 +28,15 @@ var caseInsensitive = &options.Collation{Locale: "en", Strength: 2}
 // normalizeEmail canonicalizes an email address for storage and comparison.
 func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
+}
+
+// newStateToken returns an unguessable single-use OAuth state value.
+func newStateToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 // handleRevoke ingests revoked JWTs from NextAuth.
@@ -164,13 +175,32 @@ func (s *Server) handleRegisterSeller(w http.ResponseWriter, r *http.Request) {
 		authUrl = ebay.ProdSignInURL
 	}
 
+	// `state` must be unguessable and single-use: it is what the (unauthenticated)
+	// callback trusts to decide which tenant a seller gets attached to. Using the
+	// tenant ID itself let anyone who guessed an ID bind a seller to that tenant.
+	stateToken, err := newStateToken()
+	if err != nil {
+		slog.Error("failed to generate oauth state", "err", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	if _, err := s.oauthStatesCol.InsertOne(r.Context(), bson.M{
+		"state":     stateToken,
+		"tenantId":  userID,
+		"createdAt": time.Now(),
+	}); err != nil {
+		slog.Error("failed to persist oauth state", "err", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
 	consentURL := fmt.Sprintf(
 		"%s/oauth2/authorize?client_id=%s&response_type=code&redirect_uri=%s&scope=%s&state=%s",
 		authUrl,
 		user.EbayDeveloperConfig.AppID,
 		user.EbayDeveloperConfig.RedirectURI,
 		ebayScope,
-		userID,
+		stateToken,
 	)
 
 	slog.Info("redirecting to oauth consent page", "userId", userID)
@@ -180,14 +210,34 @@ func (s *Server) handleRegisterSeller(w http.ResponseWriter, r *http.Request) {
 // handleAuthCallback handles the eBay OAuth callback (BYOK Handshake).
 func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	slog.Info("TRACE: /api/auth-callback reached", "url", r.URL.String())
-	userID, ok := r.Context().Value("userId").(string)
-	if !ok || userID == "" {
-		// Fallback to 'state' parameter for cross-domain tunnels (localhost vs ngrok)
-		userID = r.URL.Query().Get("state")
+
+	// eBay redirects here on the seller's own domain, so there is usually no
+	// session cookie: the single-use state token is what identifies the tenant.
+	// Consuming it here also prevents the callback from being replayed.
+	stateToken := r.URL.Query().Get("state")
+	userID := ""
+	if stateToken != "" {
+		var stateDoc struct {
+			TenantID string `bson:"tenantId"`
+		}
+		if err := s.oauthStatesCol.FindOneAndDelete(r.Context(),
+			bson.M{"state": stateToken}).Decode(&stateDoc); err != nil {
+			slog.Error("oauth state not recognized", "err", err)
+		} else {
+			userID = stateDoc.TenantID
+		}
+	}
+
+	// Fall back to the session cookie when the callback lands on the frontend
+	// domain (e.g. local development through a single tunnel).
+	if userID == "" {
+		if sessionUser, ok := r.Context().Value("userId").(string); ok {
+			userID = sessionUser
+		}
 	}
 
 	if userID == "" {
-		html.RenderAuthError(w, "Unauthorized session", frontendURL)
+		html.RenderAuthError(w, "This authorization link has expired. Please try adding the seller again.", frontendURL)
 		return
 	}
 
@@ -216,7 +266,7 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("Handshake Complete: seller authorized and written to DB", "ebayUser", ebayUserStore, "tenantID", userID)
 
-	html.RenderAuthSuccess(w, frontendURL)
+	html.RenderAuthSuccess(w, frontendURL, ebayUserStore)
 }
 
 // handleDeleteAccount permanently deletes the Sealift tenant and all associated resources.
