@@ -51,15 +51,26 @@ func (s *Server) authMiddleware() http.Handler {
 			return
 		}
 
-		// skip unauthenticated paths: webhooks, login flow, and public APIs
+		// Skip auth only where a session cannot exist by definition: eBay's
+		// webhooks and OAuth callback (which authenticate by signature and
+		// single-use state respectively), and the sign-up / sign-out endpoints.
+		//
+		// /api/internal/* is server-to-server from the Next.js auth flow and
+		// must stay unreachable from outside the cluster — see the NetworkPolicy
+		// in deploy/ and the deny rule in the frontend's route handlers.
+		//
+		// /api/ai/* used to be listed here, which let anyone on the internet
+		// run inference on (and ingest into) this deployment for free. Guests
+		// still reach it: they hold a real signed session token.
 		switch {
 		case r.URL.Path == "/sealift-webhook",
 			strings.HasPrefix(r.URL.Path, "/sealift-webhook/tenant/"),
 			r.URL.Path == "/api/revoke",
 			r.URL.Path == "/api/register-user",
+			r.URL.Path == "/api/request-password-reset",
+			r.URL.Path == "/api/reset-password",
 			r.URL.Path == "/api/auth-callback",
-			strings.HasPrefix(r.URL.Path, "/api/internal/"),
-			strings.HasPrefix(r.URL.Path, "/api/ai/"):
+			strings.HasPrefix(r.URL.Path, "/api/internal/"):
 			s.mux.ServeHTTP(w, r)
 			return
 		}
@@ -99,24 +110,41 @@ func (s *Server) authMiddleware() http.Handler {
 		// validate database blocklist (stateless revocation)
 		claims, ok := token.Claims.(jwt.MapClaims)
 		if !ok {
-			s.mux.ServeHTTP(w, r)
+			// Unreadable claims means no tenant identity — fail closed rather
+			// than serving the request unscoped.
+			slog.Warn("unauthorized; unreadable token claims", "path", r.URL.Path)
+			http.Error(w, "unauthorized; invalid JWT", http.StatusUnauthorized)
 			return
 		}
 
 		if jti, ok := claims["jti"].(string); ok && jti != "" {
 			var result bson.M
 			err := s.revokedTokensCol.FindOne(r.Context(), bson.M{"jti": jti}).Decode(&result)
-			if err != mongo.ErrNoDocuments {
+			switch {
+			case err == nil:
 				slog.Warn("unauthorized; token is revoked", "jti", jti)
 				http.Error(w, "unauthorized; token is revoked", http.StatusUnauthorized)
+				return
+			case err != mongo.ErrNoDocuments:
+				// Still fail closed, but don't tell the user they were logged
+				// out — a Mongo blip would otherwise look like a revocation.
+				slog.Error("revocation check failed", "err", err, "jti", jti)
+				http.Error(w, "service temporarily unavailable", http.StatusServiceUnavailable)
 				return
 			}
 		}
 
-		// add the authenticated user ID (sub) to the request context
-		if sub, ok := claims["sub"].(string); ok && sub != "" {
-			r = r.WithContext(context.WithValue(r.Context(), "userId", sub))
+		// A token without `sub` has no tenant identity. Reject it rather than
+		// letting the request through unscoped — downstream filters treat an
+		// empty tenant ID as "match everything".
+		sub, ok := claims["sub"].(string)
+		if !ok || sub == "" {
+			slog.Warn("unauthorized; token has no subject", "path", r.URL.Path)
+			http.Error(w, "unauthorized; token has no subject", http.StatusUnauthorized)
+			return
 		}
+
+		r = r.WithContext(context.WithValue(r.Context(), "userId", sub))
 
 		s.mux.ServeHTTP(w, r)
 	})

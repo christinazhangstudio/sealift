@@ -28,6 +28,7 @@ type Server struct {
 	knowledgeBaseLocalCol *mongo.Collection
 	knowledgeBaseAtlasCol *mongo.Collection
 	oauthStatesCol        *mongo.Collection
+	passwordResetsCol     *mongo.Collection
 }
 
 // getEbayClientForUser builds an eBay client
@@ -127,12 +128,20 @@ func (s *Server) registerRoutes() {
 	// Auth
 	s.mux.HandleFunc("/api/revoke", s.handleRevoke)
 	s.mux.HandleFunc("/api/register-user", s.handleRegisterUser)
-	s.mux.HandleFunc("/api/internal/get-user", s.handleGetUser) // server-to-server (call originates from NextJS Auth)
+	// Server-to-server (call originates from NextJS Auth). Verification happens
+	// here so the password hash and eBay keyset never leave the backend.
+	s.mux.HandleFunc("POST /api/internal/verify-credentials", s.handleVerifyCredentials)
 	s.mux.HandleFunc("/api/register-seller", s.handleRegisterSeller)
 	s.mux.HandleFunc("/api/auth-callback", s.handleAuthCallback)
 	s.mux.HandleFunc("DELETE /api/delete-account", s.handleDeleteAccount)
 
 	// eBay
+	s.mux.HandleFunc("GET /api/settings", s.handleGetSettings)
+	s.mux.HandleFunc("PUT /api/settings/password", s.handleChangePassword)
+	s.mux.HandleFunc("PUT /api/settings/ebay-config", s.handleUpdateEbayConfig)
+	s.mux.HandleFunc("POST /api/request-password-reset", s.handleRequestPasswordReset)
+	s.mux.HandleFunc("POST /api/reset-password", s.handleResetPassword)
+
 	s.mux.HandleFunc("GET /api/users", s.handleGetUsers)
 	s.mux.HandleFunc("DELETE /api/users/{user}", s.handleDeleteUser)
 	s.mux.HandleFunc("GET /api/transaction-summaries", s.handleGetTransactionSummaries)
@@ -154,6 +163,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/notification/users/{user}/subscriptions", s.handleCreateSubscription)
 	s.mux.HandleFunc("GET /api/notification/users/{user}/subscriptions", s.handleGetSubscriptions)
 	s.mux.HandleFunc("DELETE /api/notification/users/{user}/subscriptions", s.handleDeleteSubscriptions)
+	s.mux.HandleFunc("DELETE /api/notification/users/{user}/subscriptions/{subscriptionId}", s.handleDeleteSubscription)
 	s.mux.HandleFunc("POST /api/notification/users/{user}/subscriptions/enable", s.handleEnableSubscriptions)
 	s.mux.HandleFunc("POST /api/notification/users/{user}/subscriptions/{subscriptionId}/test", s.handleTestSubscription)
 

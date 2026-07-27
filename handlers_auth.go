@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+
+	"github.com/alexedwards/argon2id"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -129,29 +132,76 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"id": result.InsertedID})
 }
 
-// handleGetUser gets a user by email for NextAuth login verification.
-func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
-	// Only allow local calls in production context. Skipping auth middleware as it's internal.
-	email := r.URL.Query().Get("email")
-	if email == "" {
-		http.Error(w, "Email required", http.StatusBadRequest)
-		return
-	}
-	// Match case-insensitively so accounts created before emails were
-	// normalized (and any odd casing a user types) still resolve.
+// findUserByEmail resolves a tenant case-insensitively, so accounts created
+// before emails were normalized (and any odd casing a user types) still match.
+func (s *Server) findUserByEmail(ctx context.Context, email string) (SealiftUser, error) {
 	var user SealiftUser
-	if err := s.sealiftUsersCol.FindOne(r.Context(),
+	err := s.sealiftUsersCol.FindOne(ctx,
 		bson.M{"email": normalizeEmail(email)},
 		options.FindOne().SetCollation(caseInsensitive),
-	).Decode(&user); err != nil {
-		if err == mongo.ErrNoDocuments {
-			http.Error(w, "Not found", http.StatusNotFound)
-			return
+	).Decode(&user)
+	return user, err
+}
+
+// verifyPassword checks a plaintext password against a stored argon2 hash.
+// Older records wrapped the PHC string in base64 before storing it.
+func verifyPassword(password, storedHash string) (bool, error) {
+	if !strings.HasPrefix(storedHash, "$argon2") {
+		decoded, err := base64.StdEncoding.DecodeString(storedHash)
+		if err != nil {
+			return false, fmt.Errorf("stored hash is neither PHC nor base64; %w", err)
 		}
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		storedHash = string(decoded)
+	}
+	return argon2id.ComparePasswordAndHash(password, storedHash)
+}
+
+// handleVerifyCredentials authenticates a tenant for the frontend's sign-in
+// flow. The password hash is verified here and never leaves the backend — this
+// replaced an endpoint that returned the whole user document (hash and eBay
+// developer keyset included) to anyone who could reach it.
+func (s *Server) handleVerifyCredentials(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	json.NewEncoder(w).Encode(user)
+
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Email == "" || req.Password == "" {
+		http.Error(w, "Bad request", http.StatusBadRequest)
+		return
+	}
+
+	user, err := s.findUserByEmail(r.Context(), req.Email)
+	if err != nil {
+		if err != mongo.ErrNoDocuments {
+			slog.Error("credential lookup failed", "err", err)
+		}
+		// Same response whether the account is missing or the password is
+		// wrong, so this can't be used to enumerate accounts.
+		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+		return
+	}
+
+	ok, err := verifyPassword(req.Password, user.PasswordHash)
+	if err != nil {
+		slog.Error("password verification failed", "err", err, "userID", user.ID.Hex())
+		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+		return
+	}
+	if !ok {
+		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+		return
+	}
+
+	// Only what the session needs — no hash, no eBay credentials.
+	json.NewEncoder(w).Encode(map[string]string{
+		"id":    user.ID.Hex(),
+		"email": user.Email,
+	})
 }
 
 // handleRegisterSeller redirects to eBay's OAuth consent page (BYOK Dynamic Route).

@@ -72,10 +72,10 @@ func (c *Client) GetUsers(ctx context.Context, sealiftUserId string) ([]string, 
 	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	filter := bson.D{}
-	if sealiftUserId != "" {
-		filter = bson.D{{Key: "sealift_user_id", Value: sealiftUserId}}
+	if sealiftUserId == "" {
+		return nil, errors.New("tenant id is required")
 	}
+	filter := bson.D{{Key: "sealift_user_id", Value: sealiftUserId}}
 
 	var users []string
 	undec, err := c.DB.Distinct(dbCtx, "user", filter)
@@ -286,9 +286,13 @@ func (c *Client) GetToken(ctx context.Context, user string) (string, error) {
 	defer cancel()
 
 	filter := bson.M{"user": user}
-	if userID, ok := ctx.Value("userId").(string); ok && userID != "" {
-		filter["sealift_user_id"] = userID
+	// Tenant scoping is mandatory: without it this can return another tenant's
+	// OAuth token for a seller both tenants have registered.
+	userID, ok := ctx.Value("userId").(string)
+	if !ok || userID == "" {
+		return "", errors.New("tenant id is required to resolve a seller token")
 	}
+	filter["sealift_user_id"] = userID
 
 	var token UserTokenDocument
 	err := c.DB.FindOne(dbCtx, filter).Decode(&token)

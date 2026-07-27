@@ -26,10 +26,10 @@ func GetNotes(
 	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	filter := bson.M{}
-	if sealiftUserID != "" {
-		filter["sealift_user_id"] = sealiftUserID
+	if sealiftUserID == "" {
+		return nil, errors.New("tenant id is required")
 	}
+	filter := bson.M{"sealift_user_id": sealiftUserID}
 
 	result, err := notesDB.Find(dbCtx, filter)
 	if err != nil {
@@ -85,10 +85,10 @@ func UpdateNote(
 		return fmt.Errorf("failed to get object ID from hex; %w", err)
 	}
 
-	filter := bson.M{"_id": objectID}
-	if sealiftUserID != "" {
-		filter["sealift_user_id"] = sealiftUserID
+	if sealiftUserID == "" {
+		return errors.New("tenant id is required")
 	}
+	filter := bson.M{"_id": objectID, "sealift_user_id": sealiftUserID}
 
 	updateFields := bson.M{"content": content}
 	if color != "" {
@@ -123,15 +123,15 @@ func DeleteNote(
 		return fmt.Errorf("failed to get object ID from hex; %w", err)
 	}
 
-	filter := bson.M{"_id": objectID}
-	if sealiftUserID != "" {
-		filter["sealift_user_id"] = sealiftUserID
+	if sealiftUserID == "" {
+		return errors.New("tenant id is required")
 	}
+	filter := bson.M{"_id": objectID, "sealift_user_id": sealiftUserID}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	result, err := notesDB.DeleteOne(ctx, filter)
+	result, err := notesDB.DeleteOne(dbCtx, filter)
 	if err != nil {
 		return fmt.Errorf("failed to delete note; %w", err)
 	}

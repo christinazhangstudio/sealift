@@ -1,7 +1,8 @@
 cert/
 deploy/
 prompts/
-docs/
+# docs/ is the AI assistant knowledge base and is COPYed by the Dockerfile
+# docs/
 run.ps1
 run.sh
 *omit.md
