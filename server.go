@@ -27,6 +27,7 @@ type Server struct {
 	revokedTokensCol      *mongo.Collection
 	knowledgeBaseLocalCol *mongo.Collection
 	knowledgeBaseAtlasCol *mongo.Collection
+	oauthStatesCol        *mongo.Collection
 }
 
 // getEbayClientForUser builds an eBay client
