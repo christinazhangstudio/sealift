@@ -16,7 +16,17 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
+
+// caseInsensitive matches strings ignoring case and accents (strength 2), so
+// email lookups resolve regardless of how the address was typed or stored.
+var caseInsensitive = &options.Collation{Locale: "en", Strength: 2}
+
+// normalizeEmail canonicalizes an email address for storage and comparison.
+func normalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
 
 // handleRevoke ingests revoked JWTs from NextAuth.
 func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
@@ -55,6 +65,25 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
+
+	// Emails are case-insensitive identifiers: store them normalized so
+	// "Foo@x.com" and "foo@x.com" can never become two accounts.
+	user.Email = normalizeEmail(user.Email)
+
+	// The unique index is case-sensitive, so it alone won't catch a new
+	// lowercase address colliding with an existing mixed-case one.
+	existing, err := s.sealiftUsersCol.CountDocuments(r.Context(),
+		bson.M{"email": user.Email}, options.Count().SetCollation(caseInsensitive))
+	if err != nil {
+		slog.Error("failed to check for existing user", "err", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	if existing > 0 {
+		http.Error(w, "Email already exists", http.StatusConflict)
+		return
+	}
+
 	user.CreatedAt = time.Now()
 	result, err := s.sealiftUsersCol.InsertOne(r.Context(), user)
 	if err != nil {
@@ -97,8 +126,13 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Email required", http.StatusBadRequest)
 		return
 	}
+	// Match case-insensitively so accounts created before emails were
+	// normalized (and any odd casing a user types) still resolve.
 	var user SealiftUser
-	if err := s.sealiftUsersCol.FindOne(r.Context(), bson.M{"email": email}).Decode(&user); err != nil {
+	if err := s.sealiftUsersCol.FindOne(r.Context(),
+		bson.M{"email": normalizeEmail(email)},
+		options.FindOne().SetCollation(caseInsensitive),
+	).Decode(&user); err != nil {
 		if err == mongo.ErrNoDocuments {
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
