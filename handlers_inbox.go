@@ -10,12 +10,39 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 )
 
+// assertSellerOwnedByTenant confirms the eBay seller in the path belongs to the
+// authenticated tenant. Inbox documents are keyed by eBay username with no
+// tenant field, so without this any signed-in user could read or destroy
+// another tenant's notifications by guessing a (public) seller name.
+func (s *Server) assertSellerOwnedByTenant(w http.ResponseWriter, r *http.Request, ebayUser string) bool {
+	userID, ok := r.Context().Value("userId").(string)
+	if !ok || userID == "" {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return false
+	}
+
+	var check bson.M
+	if err := s.ebayAccountsCol.FindOne(r.Context(), bson.M{
+		"user":            ebayUser,
+		"sealift_user_id": userID,
+	}).Decode(&check); err != nil {
+		slog.Warn("rejected inbox access for unowned seller", "user", ebayUser, "userId", userID)
+		http.Error(w, "Access Denied", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
 // handleTrashNotification trashes a specific notification.
 func (s *Server) handleTrashNotification(w http.ResponseWriter, r *http.Request) {
 	user := r.PathValue("user")
 	notificationID := r.PathValue("notificationId")
 	if user == "" || notificationID == "" {
 		http.Error(w, "missing user or notification id", http.StatusBadRequest)
+		return
+	}
+
+	if !s.assertSellerOwnedByTenant(w, r, user) {
 		return
 	}
 
@@ -39,6 +66,10 @@ func (s *Server) handleMarkRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.assertSellerOwnedByTenant(w, r, user) {
+		return
+	}
+
 	slog.Info("marking notification as read", "user", user, "notificationId", notificationID)
 	if err := s.inboxReceiver.ReadNotification(r.Context(), user, notificationID); err != nil {
 		slog.Error("failed to mark notification as read", "err", err)
@@ -56,6 +87,10 @@ func (s *Server) handleDeletePermanent(w http.ResponseWriter, r *http.Request) {
 	notificationID := r.PathValue("notificationId")
 	if user == "" || notificationID == "" {
 		http.Error(w, "missing user or notification id", http.StatusBadRequest)
+		return
+	}
+
+	if !s.assertSellerOwnedByTenant(w, r, user) {
 		return
 	}
 

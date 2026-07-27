@@ -294,6 +294,36 @@ func (s *Server) handleDeleteSubscriptions(w http.ResponseWriter, r *http.Reques
 	fmt.Fprintf(w, "OK")
 }
 
+// handleDeleteSubscription removes a single subscription, so a seller can be
+// unsubscribed from one topic without tearing down the rest.
+func (s *Server) handleDeleteSubscription(w http.ResponseWriter, r *http.Request) {
+	user := r.PathValue("user")
+	subscriptionID := r.PathValue("subscriptionId")
+	if user == "" || subscriptionID == "" {
+		http.Error(w, "user and subscription ID required", http.StatusBadRequest)
+		return
+	}
+
+	slog.Info("received request to delete a notification subscription", "user", user, "subscriptionId", subscriptionID)
+
+	userID, _ := r.Context().Value("userId").(string)
+	dynamicClient, _, err := s.getEbayClientForUser(r.Context(), userID)
+	if err != nil {
+		slog.Error("Failed to build dynamic client for subscription delete", "err", err, "userID", userID)
+		http.Error(w, "Failed to resolve credentials", http.StatusUnauthorized)
+		return
+	}
+
+	userCtx := context.WithValue(r.Context(), auth.USER, user)
+	if err := dynamicClient.DeleteUserSubscription(userCtx, subscriptionID); err != nil {
+		slog.Error("failed to delete subscription", "err", err, "user", user, "subscriptionId", subscriptionID)
+		http.Error(w, "Failed to unsubscribe", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleEnableSubscriptions enables subscriptions for a seller.
 func (s *Server) handleEnableSubscriptions(w http.ResponseWriter, r *http.Request) {
 	user := r.PathValue("user")

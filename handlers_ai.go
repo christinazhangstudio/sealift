@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,21 +37,93 @@ var (
 )
 
 type KnowledgeChunk struct {
-	ID        primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	Source    string             `bson:"source" json:"source"`
-	Text      string             `bson:"text" json:"text"`
-	Embedding []float32          `bson:"embedding" json:"embedding"`
-	CreatedAt time.Time          `bson:"createdAt" json:"createdAt"`
+	ID     primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	Source string             `bson:"source" json:"source"`
+	Text   string             `bson:"text" json:"text"`
+	// Embedding is omitted from JSON: it is several KB of floats per chunk and
+	// the browser has no use for it.
+	Embedding []float32 `bson:"embedding" json:"-"`
+	// Model and Dims record which embedding model produced this vector.
+	// Comparing vectors from different models is meaningless, so retrieval
+	// filters on the model currently configured.
+	Model     string    `bson:"model" json:"model"`
+	Dims      int       `bson:"dims" json:"dims"`
+	CreatedAt time.Time `bson:"createdAt" json:"createdAt"`
 }
 
-// handleAIIngest ingests documentation into the knowledge base (Sequential Step 1).
+// handleAIIngest re-ingests the documentation in docs/ into the knowledge base.
 func (s *Server) handleAIIngest(w http.ResponseWriter, r *http.Request) {
+	count, err := s.ingestDocs(r.Context())
+	if err != nil {
+		slog.Error("ingest failed", "err", err)
+		http.Error(w, "Ingest failed", http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "success", "chunks_ingested": count})
+}
+
+// chunkMarkdown splits a document on its section headings rather than on blank
+// lines, and repeats the document title and heading at the top of every chunk.
+// Paragraph-level chunks lose the context that makes them findable — a
+// paragraph describing a flow rarely repeats which feature it belongs to, so
+// it doesn't match a question that names the feature.
+func chunkMarkdown(content string) []string {
+	lines := strings.Split(content, "\n")
+
+	docTitle := ""
+	for _, line := range lines {
+		if strings.HasPrefix(line, "# ") {
+			docTitle = strings.TrimSpace(strings.TrimPrefix(line, "# "))
+			break
+		}
+	}
+
+	var chunks []string
+	var heading string
+	var body []string
+
+	flush := func() {
+		text := strings.TrimSpace(strings.Join(body, "\n"))
+		body = nil
+		if text == "" {
+			return
+		}
+		var b strings.Builder
+		if docTitle != "" {
+			b.WriteString(docTitle)
+			if heading != "" {
+				b.WriteString(" — ")
+				b.WriteString(heading)
+			}
+			b.WriteString("\n\n")
+		}
+		b.WriteString(text)
+		chunks = append(chunks, b.String())
+	}
+
+	for _, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "## "):
+			flush()
+			heading = strings.TrimSpace(strings.TrimPrefix(line, "## "))
+		case strings.HasPrefix(line, "# "):
+			// Document title: already captured, and it starts no section.
+		default:
+			body = append(body, line)
+		}
+	}
+	flush()
+
+	return chunks
+}
+
+// ingestDocs embeds every markdown file in docs/ and replaces that source's
+// chunks in the knowledge base. Safe to run repeatedly.
+func (s *Server) ingestDocs(ctx context.Context) (int, error) {
 	docsPath := "docs"
 	files, err := os.ReadDir(docsPath)
 	if err != nil {
-		slog.Error("Failed to read docs directory", "err", err)
-		http.Error(w, "Could not find docs directory", http.StatusInternalServerError)
-		return
+		return 0, fmt.Errorf("read docs directory; %w", err)
 	}
 
 	var ingestedCount int
@@ -64,13 +137,18 @@ func (s *Server) handleAIIngest(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Simple chunking: split by paragraphs for POC
-		chunks := strings.Split(string(content), "\n\n")
-		for _, text := range chunks {
-			text = strings.TrimSpace(text)
-			if text == "" {
-				continue
+		// Replace this source's chunks rather than appending: ingest previously
+		// duplicated the entire knowledge base on every run.
+		if _, err := s.knowledgeBaseLocalCol.DeleteMany(ctx, bson.M{"source": f.Name()}); err != nil {
+			slog.Warn("failed to clear previous chunks", "err", err, "source", f.Name())
+		}
+		if s.knowledgeBaseAtlasCol != nil {
+			if _, err := s.knowledgeBaseAtlasCol.DeleteMany(ctx, bson.M{"source": f.Name()}); err != nil {
+				slog.Warn("failed to clear previous Atlas chunks", "err", err, "source", f.Name())
 			}
+		}
+
+		for _, text := range chunkMarkdown(string(content)) {
 
 			embedding, err := getEmbedding(text)
 			if err != nil {
@@ -82,24 +160,33 @@ func (s *Server) handleAIIngest(w http.ResponseWriter, r *http.Request) {
 				Source:    f.Name(),
 				Text:      text,
 				Embedding: embedding,
+				Model:     selfHostedEmbeddingModel,
+				Dims:      len(embedding),
 				CreatedAt: time.Now(),
 			}
 
-			_, err = s.knowledgeBaseLocalCol.InsertOne(r.Context(), chunk)
-			if err != nil {
+			stored := false
+			if _, err := s.knowledgeBaseLocalCol.InsertOne(ctx, chunk); err != nil {
 				slog.Error("Failed to save chunk to Local Mongo", "err", err)
+			} else {
+				stored = true
 			}
 			if s.knowledgeBaseAtlasCol != nil {
-				_, err = s.knowledgeBaseAtlasCol.InsertOne(r.Context(), chunk)
-				if err != nil {
+				if _, err := s.knowledgeBaseAtlasCol.InsertOne(ctx, chunk); err != nil {
 					slog.Error("Failed to save chunk to Atlas Mongo", "err", err)
+				} else {
+					stored = true
 				}
 			}
-			ingestedCount++
+			// Only count what actually landed somewhere.
+			if stored {
+				ingestedCount++
+			}
 		}
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{"status": "success", "chunks_ingested": ingestedCount})
+	slog.Info("knowledge base ingest complete", "chunks", ingestedCount, "model", selfHostedEmbeddingModel)
+	return ingestedCount, nil
 }
 
 // handleAIAsk handles documentation queries (Sequential Step 2 & 3 Combined).
@@ -134,8 +221,8 @@ func (s *Server) handleAIAsk(w http.ResponseWriter, r *http.Request) {
 				{Key: "index", Value: "vector_index"}, // Must match the name in MongoDB Atlas
 				{Key: "path", Value: "embedding"},
 				{Key: "queryVector", Value: queryEmbedding},
-				{Key: "numCandidates", Value: 10},
-				{Key: "limit", Value: 3},
+				{Key: "numCandidates", Value: 60},
+				{Key: "limit", Value: 6},
 			}},
 		},
 	}
@@ -174,7 +261,9 @@ func (s *Server) handleAIAsk(w http.ResponseWriter, r *http.Request) {
 	// Step 2b: Fallback to Local Search if Atlas is missing or empty
 	if len(chunks) == 0 {
 		slog.Debug("Atlas search empty or failed, trying local fallback...")
-		allCursor, err := s.knowledgeBaseLocalCol.Find(r.Context(), bson.M{})
+		// Only vectors from the current embedding model are comparable.
+		allCursor, err := s.knowledgeBaseLocalCol.Find(r.Context(),
+			bson.M{"model": selfHostedEmbeddingModel})
 		if err != nil {
 			slog.Error("Local Knowledge base inaccessible", "err", err)
 		} else {
@@ -202,7 +291,7 @@ func (s *Server) handleAIAsk(w http.ResponseWriter, r *http.Request) {
 					return scored[i].Score > scored[j].Score
 				})
 
-				limit := 3
+				limit := 6
 				if len(scored) < limit {
 					limit = len(scored)
 				}
@@ -216,22 +305,26 @@ func (s *Server) handleAIAsk(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 3. Generation: Combine context and ask Llama
+	// 3. Generation: Combine context and ask the model.
+	//
+	// The mode depends on whether retrieval actually found anything — NOT on
+	// whether there's conversation history. Keying off history meant every
+	// follow-up question used the RAG prompt with an empty context, whose
+	// instructions say "if the context doesn't contain the answer, say you
+	// don't know" — so every conversation answered turn 1 and then refused.
 	contextText := ""
-	isCasualChat := len(chunks) == 0 && history == "" // Only casual if no docs AND no conversation history
-
-	if !isCasualChat {
-		for i, chunk := range chunks {
-			contextText += fmt.Sprintf("[%d] Source: %s\nContent: %s\n\n", i+1, chunk.Source, chunk.Text)
-		}
+	for i, chunk := range chunks {
+		contextText += fmt.Sprintf("[%d] Source: %s\nContent: %s\n\n", i+1, chunk.Source, chunk.Text)
 	}
+	isCasualChat := len(chunks) == 0
 
-	slog.Info("Requesting AI Generation", "isCasual", isCasualChat)
+	slog.Info("Requesting AI Generation", "isCasual", isCasualChat, "chunks", len(chunks), "hasHistory", history != "")
 
-	// Inject conversation history into context for LLM (not used in embedding/vector search)
+	// Conversation history is prepended for the LLM only; it never takes part in
+	// embedding or vector search.
 	llmContext := contextText
 	if history != "" {
-		llmContext = fmt.Sprintf("Previous Conversation:\n%s\n\n%s", history, contextText)
+		llmContext = fmt.Sprintf("Previous conversation:\n%s\n\n%s", history, contextText)
 	}
 
 	stream := r.URL.Query().Get("stream") == "1" || r.URL.Query().Get("stream") == "true"
@@ -341,7 +434,7 @@ func getOpenAICompatibleEmbedding(text string) ([]float32, error) {
 func getCompletion(query string, contextText string, isCasual bool) (string, string, error) {
 	var prompt string
 	if isCasual {
-		prompt = loadPromptTemplate("prompts/casual.txt", map[string]string{"Query": query})
+		prompt = loadPromptTemplate("prompts/casual.txt", map[string]string{"Query": query, "Context": contextText})
 	} else {
 		prompt = loadPromptTemplate("prompts/rag.txt", map[string]string{"Query": query, "Context": contextText})
 	}
@@ -530,7 +623,7 @@ func streamCompletion(
 ) error {
 	var prompt string
 	if isCasual {
-		prompt = loadPromptTemplate("prompts/casual.txt", map[string]string{"Query": query})
+		prompt = loadPromptTemplate("prompts/casual.txt", map[string]string{"Query": query, "Context": contextText})
 	} else {
 		prompt = loadPromptTemplate("prompts/rag.txt", map[string]string{"Query": query, "Context": contextText})
 	}
@@ -702,15 +795,32 @@ func cosineSimilarity(a, b []float32) float32 {
 // template would send the model an EMPTY prompt — the user's query never
 // reaches the model at all and it free-associates.
 var defaultPromptTemplates = map[string]string{
-	"prompts/casual.txt": `You are the Sealift AI assistant. Sealift is a marketplace management dashboard for eBay sellers (listings, payouts, transaction summaries, notifications, and sticky notes).
+	"prompts/casual.txt": `You are the Sealift assistant. Sealift is a dashboard that eBay sellers use to manage their stores: registered sellers, active and sold listings, payouts, transaction summaries, account balances, eBay notifications (delivered to an inbox in the app), sticky notes, charts, and an AI listing-description generator.
 
-Answer the user's message conversationally and concisely. If you are not sure about something, say so honestly instead of guessing.
+Answer the user conversationally and get to the point — usually two or three sentences. Use markdown when it genuinely helps (short lists, bold for a UI label), not for its own sake.
 
-User message:
+Guidelines:
+- If the question is about how to do something in Sealift and you are confident, explain it directly, naming the page in the left navigation.
+- If you don't know a Sealift-specific detail, say so plainly and suggest where in the app to look. Never invent menu items, buttons, or behavior.
+- You cannot see the user's data — no listings, payouts, or balances. If they ask "how much did I make", point them at the relevant page instead of guessing.
+- Don't mention documents, context, or retrieval. The user is talking to a product assistant, not a search engine.
+
+{{if .Context}}{{.Context}}
+
+{{end}}User message:
 {{.Query}}`,
-	"prompts/rag.txt": `You are the Sealift AI documentation assistant. Sealift is a marketplace management dashboard for eBay sellers. Use the provided context to answer the user's question. If the context does not contain the answer, say you don't know. Answer concisely and cite source names when helpful.
+	"prompts/rag.txt": `You are the Sealift assistant, answering from Sealift's own documentation. Sealift is a dashboard that eBay sellers use to manage their stores.
 
-Context:
+Use the reference material below to answer. It was retrieved automatically and may be only partly relevant — use what fits and ignore the rest.
+
+Guidelines:
+- Answer directly and concisely. Name the page in the left navigation when describing where to do something.
+- When the reference material answers the question, answer from it confidently and specifically. Don't hedge, and don't suggest the docs might differ.
+- Only if it genuinely doesn't cover the question: say briefly what you're unsure of and point to the likeliest page. Never invent page names, buttons, or steps.
+- Write for the user: don't say "the context says" or cite chunk numbers. Sources are shown separately in the UI.
+- You cannot see the user's data — no listings, payouts, or balances.
+
+Reference material:
 {{.Context}}
 
 User question:

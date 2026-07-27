@@ -100,6 +100,12 @@ func main() {
 		Options: options.Index().SetExpireAfterSeconds(int32(15 * 60)),
 	})
 
+	// Reset tokens expire on their own; the handler also checks the age.
+	_, _ = mongoDB.Collection("password_resets").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "createdAt", Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(int32(2 * 60 * 60)),
+	})
+
 	sharedClient := &http.Client{Timeout: time.Second * 30}
 
 	inboxCollection := mongoDB.Collection("inbox")
@@ -118,9 +124,42 @@ func main() {
 		knowledgeBaseLocalCol: mongoDB.Collection("knowledge_base"),
 		knowledgeBaseAtlasCol: mongoKnowledgeBaseAtlas,
 		oauthStatesCol:        mongoDB.Collection("oauth_states"),
+		passwordResetsCol:     mongoDB.Collection("password_resets"),
 	}
 
 	srv.registerRoutes()
+
+	// Populate the AI knowledge base if it has no chunks from the embedding
+	// model currently configured. This covers both a fresh deployment and a
+	// change of embedding model (vectors from different models aren't
+	// comparable, so old ones are ignored by retrieval and must be replaced).
+	// Runs in the background so a slow or unreachable embedding endpoint can't
+	// hold up startup.
+	go func() {
+		if selfHostedEmbeddingURL == "" {
+			slog.Info("no embedding endpoint configured; skipping knowledge base ingest")
+			return
+		}
+
+		ingestCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+
+		count, err := mongoDB.Collection("knowledge_base").CountDocuments(ingestCtx,
+			bson.M{"model": selfHostedEmbeddingModel})
+		if err != nil {
+			slog.Warn("could not check knowledge base state; skipping ingest", "err", err)
+			return
+		}
+		if count > 0 {
+			slog.Info("knowledge base already populated", "chunks", count, "model", selfHostedEmbeddingModel)
+			return
+		}
+
+		slog.Info("knowledge base empty for current model; ingesting docs", "model", selfHostedEmbeddingModel)
+		if _, err := srv.ingestDocs(ingestCtx); err != nil {
+			slog.Warn("knowledge base ingest failed; AI assistant will answer without docs", "err", err)
+		}
+	}()
 
 	// conditionally whitelist localhost only
 	// during local development.
