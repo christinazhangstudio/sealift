@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 )
@@ -90,6 +91,14 @@ func (s *Server) handleSSEStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	// Disable proxy buffering (nginx) so pushes aren't held back.
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
 
 	connChan := make(chan map[string]interface{}, 100)
 	s.inboxReceiver.AddClient(ebayUser, connChan)
@@ -98,19 +107,36 @@ func (s *Server) handleSSEStream(w http.ResponseWriter, r *http.Request) {
 		close(connChan)
 	}()
 
-	userWebhooks, _ := s.inboxReceiver.GetPastNotifications(r.Context(), ebayUser)
-	if len(userWebhooks) > 0 {
-		data, _ := json.Marshal(userWebhooks)
-		fmt.Fprintf(w, "event: initial\ndata: %s\n\n", data)
-		w.(http.Flusher).Flush()
+	// Establish the stream immediately. Without this the response headers are
+	// withheld until the first notification arrives, which browsers and proxies
+	// treat as a hung request and retry.
+	fmt.Fprint(w, ": connected\n\n")
+	flusher.Flush()
+
+	userWebhooks, err := s.inboxReceiver.GetPastNotifications(r.Context(), ebayUser)
+	if err != nil {
+		slog.Error("failed to load past notifications", "err", err, "user", ebayUser)
+		userWebhooks = []map[string]interface{}{}
 	}
+	// Always send initial (even empty) so the client knows the backlog is loaded.
+	data, _ := json.Marshal(userWebhooks)
+	fmt.Fprintf(w, "event: initial\ndata: %s\n\n", data)
+	flusher.Flush()
+
+	// Cloudflare drops idle connections after ~100s; heartbeat well inside that
+	// so the stream survives quiet periods instead of reconnect-looping.
+	heartbeat := time.NewTicker(25 * time.Second)
+	defer heartbeat.Stop()
 
 	for {
 		select {
 		case msg := <-connChan:
 			data, _ := json.Marshal(msg)
 			fmt.Fprintf(w, "event: message\ndata: %s\n\n", data)
-			w.(http.Flusher).Flush()
+			flusher.Flush()
+		case <-heartbeat.C:
+			fmt.Fprint(w, ": keepalive\n\n")
+			flusher.Flush()
 		case <-r.Context().Done():
 			return
 		}
