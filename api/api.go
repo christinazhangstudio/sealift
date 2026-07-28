@@ -1,6 +1,8 @@
 package api
 
 import (
+	"github.tesla.com/chrzhang/sealift/auth"
+
 	"github.tesla.com/chrzhang/sealift/ebay"
 )
 
@@ -11,6 +13,9 @@ type Error struct {
 
 type Users struct {
 	Users []string `json:"users"`
+	// Sellers carries the same sellers with their connection health. Users is
+	// kept for existing callers that only need the names.
+	Sellers []auth.SellerStatus `json:"sellers"`
 }
 
 type UserSummary struct {

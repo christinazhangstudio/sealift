@@ -24,6 +24,10 @@ const (
 	USER = "user"
 
 	timezone = "America/Chicago"
+
+	// defaultRefreshTokenLifetime is eBay's documented refresh-token validity,
+	// used when a grant response omits refresh_token_expires_in.
+	defaultRefreshTokenLifetime = 18 * 30 * 24 * time.Hour
 )
 
 type Client struct {
@@ -59,15 +63,94 @@ type Client struct {
 }
 
 type UserTokenDocument struct {
-	User                 string    `bson:"user"`
-	SealiftUserId        string    `bson:"sealift_user_id"`
-	AccessToken          string    `bson:"access_token"`
-	RefreshToken         string    `bson:"refresh_token"`
-	ExpiresAt            time.Time `bson:"expires_at,omitempty"`
-	NotificationEndpoint string    `bson:"notification_endpoint,omitempty"`
+	User          string    `bson:"user"`
+	SealiftUserId string    `bson:"sealift_user_id"`
+	AccessToken   string    `bson:"access_token"`
+	RefreshToken  string    `bson:"refresh_token"`
+	ExpiresAt     time.Time `bson:"expires_at,omitempty"`
+	// RefreshTokenExpiresAt is when the seller must re-consent. eBay returns
+	// this (~18 months out) on every grant; it used to be logged and discarded,
+	// so nothing could warn before a seller silently stopped working.
+	RefreshTokenExpiresAt time.Time `bson:"refresh_token_expires_at,omitempty"`
+	// ReauthRequired is set when eBay rejects the refresh token outright, so the
+	// UI can prompt for reconnection instead of showing an empty page.
+	ReauthRequired       bool   `bson:"reauth_required,omitempty"`
+	NotificationEndpoint string `bson:"notification_endpoint,omitempty"`
 }
 
+// ErrSellerReauthRequired means the seller's refresh token is no longer valid
+// and only the eBay consent flow can restore access — retrying won't help.
+var ErrSellerReauthRequired = errors.New("seller must re-authorize with eBay")
+
 // GetUsers returns the users registered for a specific Sealift client.
+// Seller connection states surfaced to the UI.
+const (
+	SellerConnected = "connected"
+	SellerExpiring  = "expiring"
+	SellerExpired   = "expired"
+)
+
+// expiringWindow is how far ahead of re-consent we start warning.
+const expiringWindow = 30 * 24 * time.Hour
+
+// SellerStatus describes the health of one seller's eBay connection.
+type SellerStatus struct {
+	User      string     `json:"user"`
+	Status    string     `json:"status"`
+	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+}
+
+// GetSellers returns each registered seller with the state of its eBay
+// authorization, so the UI can warn before a connection lapses instead of
+// silently returning nothing once it has.
+func (c *Client) GetSellers(ctx context.Context, sealiftUserId string) ([]SellerStatus, error) {
+	if sealiftUserId == "" {
+		return nil, errors.New("tenant id is required")
+	}
+
+	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	cursor, err := c.DB.Find(dbCtx, bson.M{"sealift_user_id": sealiftUserId})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list sellers; %w", err)
+	}
+	defer cursor.Close(dbCtx)
+
+	var docs []UserTokenDocument
+	if err := cursor.All(dbCtx, &docs); err != nil {
+		return nil, fmt.Errorf("failed to decode sellers; %w", err)
+	}
+
+	sellers := make([]SellerStatus, 0, len(docs))
+	for _, doc := range docs {
+		status := SellerConnected
+		switch {
+		case doc.ReauthRequired:
+			status = SellerExpired
+		case !doc.RefreshTokenExpiresAt.IsZero():
+			remaining := time.Until(doc.RefreshTokenExpiresAt)
+			if remaining <= 0 {
+				status = SellerExpired
+			} else if remaining <= expiringWindow {
+				status = SellerExpiring
+			}
+		}
+
+		seller := SellerStatus{User: doc.User, Status: status}
+		if !doc.RefreshTokenExpiresAt.IsZero() {
+			expiry := doc.RefreshTokenExpiresAt
+			seller.ExpiresAt = &expiry
+		}
+		sellers = append(sellers, seller)
+	}
+
+	slices.SortFunc(sellers, func(a, b SellerStatus) int {
+		return strings.Compare(a.User, b.User)
+	})
+	return sellers, nil
+}
+
 func (c *Client) GetUsers(ctx context.Context, sealiftUserId string) ([]string, error) {
 	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -123,17 +206,25 @@ func (c *Client) AuthUser(ctx context.Context, authCode string, sealiftUserId st
 
 	expiresAt := time.Now().In(loc).Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 
+	// eBay omits refresh_token_expires_in on some grants; fall back to its
+	// documented lifetime so the field is never silently zero.
+	refreshLifetime := time.Duration(tokenResp.RefreshTokenExpiresIn) * time.Second
+	if refreshLifetime <= 0 {
+		refreshLifetime = defaultRefreshTokenLifetime
+	}
+
 	filter := bson.M{
 		"user":            user,
 		"sealift_user_id": sealiftUserId,
 	}
 	update := bson.M{
 		"$set": UserTokenDocument{
-			User:          user,
-			SealiftUserId: sealiftUserId,
-			AccessToken:   tokenResp.AccessToken,
-			RefreshToken:  tokenResp.RefreshToken,
-			ExpiresAt:     expiresAt,
+			User:                  user,
+			SealiftUserId:         sealiftUserId,
+			AccessToken:           tokenResp.AccessToken,
+			RefreshToken:          tokenResp.RefreshToken,
+			ExpiresAt:             expiresAt,
+			RefreshTokenExpiresAt: time.Now().In(loc).Add(refreshLifetime),
 		},
 	}
 
@@ -316,20 +407,39 @@ func (c *Client) GetToken(ctx context.Context, user string) (string, error) {
 		)
 		newToken, err := c.refreshToken(token.RefreshToken)
 		if err != nil {
+			if errors.Is(err, ErrSellerReauthRequired) {
+				// Flag the seller so the UI can offer a Reconnect button rather
+				// than rendering an empty page forever.
+				if _, markErr := c.DB.UpdateOne(dbCtx, filter,
+					bson.M{"$set": bson.M{"reauth_required": true}}); markErr != nil {
+					slog.Error("failed to flag seller for reauth", "err", markErr, "user", user)
+				}
+				return "", err
+			}
 			return "", fmt.Errorf("failed to refresh token; %w", err)
 		}
 
+		// The refresh call is a network round trip; dbCtx's short deadline was
+		// budgeted for the read above and may already be spent.
+		writeCtx, writeCancel := context.WithTimeout(ctx, 5*time.Second)
+		defer writeCancel()
+
 		// update document, refresh token remains the same
 		newExpiresAt := time.Now().In(loc).Add(time.Duration(newToken.ExpiresIn) * time.Second)
-		update := bson.M{
-			"$set": bson.M{
-				"access_token": newToken.AccessToken,
-				"expires_at":   newExpiresAt,
-			},
+		set := bson.M{
+			"access_token":    newToken.AccessToken,
+			"expires_at":      newExpiresAt,
+			"reauth_required": false,
 		}
-		result := c.DB.FindOneAndUpdate(dbCtx, filter, update)
-		if result.Err() != nil {
-			return "", fmt.Errorf("failed to update user token document; %w", err)
+		// eBay reissues the refresh token on some grants; keep the expiry current.
+		if newToken.RefreshTokenExpiresIn > 0 {
+			set["refresh_token_expires_at"] = time.Now().In(loc).
+				Add(time.Duration(newToken.RefreshTokenExpiresIn) * time.Second)
+		}
+		if err := c.DB.FindOneAndUpdate(writeCtx, filter, bson.M{"$set": set}).Err(); err != nil {
+			// The token itself is valid — returning it beats failing the request
+			// because a database write didn't land.
+			slog.Error("failed to persist refreshed token", "err", err, "user", user)
 		}
 
 		return newToken.AccessToken, nil
@@ -375,15 +485,20 @@ func (c *Client) refreshToken(refreshToken string) (*TokenResponse, error) {
 	}
 
 	if tokenResp.Error != "" {
+		// invalid_grant means the refresh token is dead (expired, revoked by the
+		// seller, or issued to different credentials). No amount of retrying
+		// fixes it — the seller has to go through eBay consent again.
+		if tokenResp.Error == "invalid_grant" {
+			slog.Warn("refresh token rejected by eBay; re-consent required",
+				"err", tokenResp.ErrorDescription)
+			return nil, ErrSellerReauthRequired
+		}
 		return nil, fmt.Errorf(
 			"token request failed - %s; %s",
 			tokenResp.Error,
 			tokenResp.ErrorDescription,
 		)
 	}
-	// TODO: if refresh token failed with:
-	// "token request failed - invalid_grant; the provided authorization refresh token is invalid or was issued to another client"
-	// should redirect user back to oauth consent/login
 
 	if tokenResp.AccessToken == "" {
 		return nil, errors.New("empty access token")

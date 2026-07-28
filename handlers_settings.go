@@ -157,6 +157,33 @@ func (s *Server) handleUpdateEbayConfig(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// A blank Cert ID means "keep the stored one" — validate with that value so
+	// saving unrelated changes doesn't require retyping a secret we never show.
+	certForCheck := req.CertID
+	if certForCheck == "" {
+		var current SealiftUser
+		if err := s.sealiftUsersCol.FindOne(r.Context(), bson.M{"_id": objID}).Decode(&current); err != nil {
+			http.Error(w, "Account not found", http.StatusNotFound)
+			return
+		}
+		certForCheck = current.EbayDeveloperConfig.CertID
+	}
+
+	// Same check as registration: don't let Settings brick an account.
+	if err := s.validateEbayKeyset(r.Context(), EbayDeveloperConfig{
+		AppID:       req.AppID,
+		DevID:       req.DevID,
+		CertID:      certForCheck,
+		RedirectURI: req.RedirectURI,
+		IsSandbox:   req.IsSandbox,
+	}); err != nil {
+		slog.Warn("rejected eBay config update", "err", err, "userID", userID)
+		http.Error(w,
+			"eBay rejected these developer keys. Check the App ID and Cert ID (and the Sandbox setting) and try again.",
+			http.StatusBadRequest)
+		return
+	}
+
 	update := bson.M{
 		"ebayDeveloperConfig.appId":       req.AppID,
 		"ebayDeveloperConfig.devId":       req.DevID,

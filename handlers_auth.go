@@ -68,6 +68,34 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// validateEbayKeyset checks a tenant's credentials against eBay before the
+// account is created. Registration previously accepted anything, so a typo in
+// the App ID or Cert ID produced an account that failed on every page forever,
+// with no way to correct it.
+func (s *Server) validateEbayKeyset(ctx context.Context, cfg EbayDeveloperConfig) error {
+	authURL := ebay.ProdAuthURL
+	if cfg.IsSandbox || strings.Contains(cfg.AppID, "SBX-") {
+		authURL = ebay.SandboxAuthURL
+	}
+
+	client := &auth.Client{
+		Client:       s.httpClient,
+		DB:           s.ebayAccountsCol,
+		AuthURL:      authURL,
+		ClientID:     cfg.AppID,
+		ClientSecret: cfg.CertID,
+		DevID:        cfg.DevID,
+	}
+
+	checkCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	if _, err := client.GetApplicationToken(checkCtx); err != nil {
+		return err
+	}
+	return nil
+}
+
 // handleRegisterUser registers a new Sealift user (called by Next.js frontend).
 func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -95,6 +123,16 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if existing > 0 {
 		http.Error(w, "Email already exists", http.StatusConflict)
+		return
+	}
+
+	// Reject bad credentials up front rather than creating an account that can
+	// never talk to eBay.
+	if err := s.validateEbayKeyset(r.Context(), user.EbayDeveloperConfig); err != nil {
+		slog.Warn("rejected registration with invalid eBay keyset", "err", err, "email", user.Email)
+		http.Error(w,
+			"eBay rejected these developer keys. Check the App ID and Cert ID (and the Sandbox setting) and try again.",
+			http.StatusBadRequest)
 		return
 	}
 
