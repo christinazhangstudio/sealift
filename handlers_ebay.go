@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,24 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 )
+
+// respondIfReauthRequired converts a dead-refresh-token error into a response
+// the UI can act on. Without it the seller's pages just 500 and render empty,
+// which is indistinguishable from "this seller has no data".
+func respondIfReauthRequired(w http.ResponseWriter, err error, user string) bool {
+	if !errors.Is(err, auth.ErrSellerReauthRequired) {
+		return false
+	}
+	slog.Warn("seller requires re-authorization", "user", user)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	json.NewEncoder(w).Encode(map[string]string{
+		"error":   "reauth_required",
+		"user":    user,
+		"message": "This seller's eBay authorization has expired. Reconnect it to continue.",
+	})
+	return true
+}
 
 func (s *Server) handleGetUsers(w http.ResponseWriter, r *http.Request) {
 	userID, _ := r.Context().Value("userId").(string)
@@ -35,7 +54,13 @@ func (s *Server) handleGetUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	json.NewEncoder(w).Encode(api.Users{Users: users})
+	// Health is supplementary: if it fails, still return the seller names.
+	sellers, err := dynamicClient.Auth.GetSellers(r.Context(), userID)
+	if err != nil {
+		slog.Warn("failed to resolve seller connection status", "err", err, "userID", userID)
+	}
+
+	json.NewEncoder(w).Encode(api.Users{Users: users, Sellers: sellers})
 }
 
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
@@ -128,6 +153,9 @@ func (s *Server) handleGetTransactionSummaries(w http.ResponseWriter, r *http.Re
 		userCtx := context.WithValue(r.Context(), auth.USER, user)
 		summary, err := dynamicClient.GetTransactionSummary(userCtx)
 		if err != nil {
+			if respondIfReauthRequired(w, err, user) {
+				return
+			}
 			slog.Error("failed to get transaction summary", "err", err, "user", user)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -176,6 +204,9 @@ func (s *Server) handleGetPayouts(w http.ResponseWriter, r *http.Request) {
 	userCtx := context.WithValue(r.Context(), auth.USER, user)
 	payouts, err := dynamicClient.GetPayouts(userCtx, pageSize, pageIdx)
 	if err != nil {
+		if respondIfReauthRequired(w, err, user) {
+			return
+		}
 		slog.Error("failed to get payouts", "err", err, "user", user)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -248,6 +279,9 @@ func (s *Server) handleGetListings(w http.ResponseWriter, r *http.Request) {
 	// for the specified range/page index, that's fine
 	// use an empty Listings array for the response.
 	if err != nil && err != ebay.ErrHasNoMoreItems {
+		if respondIfReauthRequired(w, err, user) {
+			return
+		}
 		slog.Error("failed to get listings", "err", err, "user", user)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -293,6 +327,9 @@ func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 	userCtx := context.WithValue(r.Context(), auth.USER, user)
 	account, err := dynamicClient.GetAccount(userCtx, pageSize, pageIdx)
 	if err != nil {
+		if respondIfReauthRequired(w, err, user) {
+			return
+		}
 		slog.Error("failed to get account", "err", err, "user", user)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
