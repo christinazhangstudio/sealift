@@ -88,30 +88,7 @@ func main() {
 
 	mongoDB := db.Database("sealift")
 
-	// ensure email uniqueness
-	_, _ = mongoDB.Collection("sealift_users").Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "email", Value: 1}},
-		Options: options.Index().SetUnique(true),
-	})
-
-	// set up TTL index so revoked tokens are
-	// automatically deleted from Mongo after 24 hours
-	_, _ = mongoDB.Collection("revoked_tokens").Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "createdAt", Value: 1}},
-		Options: options.Index().SetExpireAfterSeconds(int32(24 * 60 * 60)),
-	})
-
-	// OAuth state tokens are single-use and short-lived; expire leftovers.
-	_, _ = mongoDB.Collection("oauth_states").Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "createdAt", Value: 1}},
-		Options: options.Index().SetExpireAfterSeconds(int32(15 * 60)),
-	})
-
-	// Reset tokens expire on their own; the handler also checks the age.
-	_, _ = mongoDB.Collection("password_resets").Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "createdAt", Value: 1}},
-		Options: options.Index().SetExpireAfterSeconds(int32(2 * 60 * 60)),
-	})
+	ensureIndexes(ctx, mongoDB)
 
 	sharedClient := &http.Client{Timeout: time.Second * 30}
 
