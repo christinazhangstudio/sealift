@@ -13,6 +13,7 @@ import (
 
 	"github.com/rs/cors"
 	"github.tesla.com/chrzhang/sealift/inbox"
+	"github.tesla.com/chrzhang/sealift/secrets"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -57,6 +58,12 @@ var (
 
 func main() {
 	ctx := context.Background()
+
+	// Credential encryption keys must load before anything reads or writes a
+	// stored secret.
+	if err := secrets.Init(); err != nil {
+		panic(fmt.Sprintf("invalid credential encryption configuration: %v", err))
+	}
 
 	// local DB setup
 	db, err := newDB(ctx, mongoURI)
@@ -126,6 +133,9 @@ func main() {
 		oauthStatesCol:        mongoDB.Collection("oauth_states"),
 		passwordResetsCol:     mongoDB.Collection("password_resets"),
 	}
+
+	// Bring any pre-encryption credentials up to date before serving traffic.
+	encryptStoredCredentials(ctx, mongoDB)
 
 	srv.registerRoutes()
 

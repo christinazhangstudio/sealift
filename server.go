@@ -10,6 +10,7 @@ import (
 	"github.tesla.com/chrzhang/sealift/auth"
 	"github.tesla.com/chrzhang/sealift/ebay"
 	"github.tesla.com/chrzhang/sealift/inbox"
+	"github.tesla.com/chrzhang/sealift/secrets"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -45,6 +46,13 @@ func (s *Server) getEbayClientForUser(
 	if err := s.sealiftUsersCol.FindOne(reqCtx, bson.M{"_id": objID}).Decode(&user); err != nil {
 		return nil, user, fmt.Errorf("failed to find user: %w", err)
 	}
+
+	// The client secret is stored encrypted; every caller needs it in the clear.
+	certID, err := secrets.Decrypt(user.EbayDeveloperConfig.CertID)
+	if err != nil {
+		return nil, user, fmt.Errorf("failed to decrypt eBay credentials: %w", err)
+	}
+	user.EbayDeveloperConfig.CertID = certID
 
 	u := ebay.ProdAPIURL
 	tu := ebay.ProdTradURL

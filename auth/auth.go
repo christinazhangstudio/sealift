@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.tesla.com/chrzhang/sealift/secrets"
+
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 
@@ -213,6 +215,17 @@ func (c *Client) AuthUser(ctx context.Context, authCode string, sealiftUserId st
 		refreshLifetime = defaultRefreshTokenLifetime
 	}
 
+	// Tokens grant access to the seller's eBay account; they are encrypted so a
+	// database copy isn't a copy of that access.
+	encAccess, err := secrets.Encrypt(tokenResp.AccessToken)
+	if err != nil {
+		return "", fmt.Errorf("failed to encrypt access token; %w", err)
+	}
+	encRefresh, err := secrets.Encrypt(tokenResp.RefreshToken)
+	if err != nil {
+		return "", fmt.Errorf("failed to encrypt refresh token; %w", err)
+	}
+
 	filter := bson.M{
 		"user":            user,
 		"sealift_user_id": sealiftUserId,
@@ -221,8 +234,8 @@ func (c *Client) AuthUser(ctx context.Context, authCode string, sealiftUserId st
 		"$set": UserTokenDocument{
 			User:                  user,
 			SealiftUserId:         sealiftUserId,
-			AccessToken:           tokenResp.AccessToken,
-			RefreshToken:          tokenResp.RefreshToken,
+			AccessToken:           encAccess,
+			RefreshToken:          encRefresh,
 			ExpiresAt:             expiresAt,
 			RefreshTokenExpiresAt: time.Now().In(loc).Add(refreshLifetime),
 		},
@@ -391,6 +404,13 @@ func (c *Client) GetToken(ctx context.Context, user string) (string, error) {
 		return "", fmt.Errorf("failed to find token for user; %w", err)
 	}
 
+	if token.AccessToken, err = secrets.Decrypt(token.AccessToken); err != nil {
+		return "", fmt.Errorf("failed to decrypt access token; %w", err)
+	}
+	if token.RefreshToken, err = secrets.Decrypt(token.RefreshToken); err != nil {
+		return "", fmt.Errorf("failed to decrypt refresh token; %w", err)
+	}
+
 	loc, err := time.LoadLocation(timezone)
 	if err != nil {
 		return "", fmt.Errorf("failed to load timezone; %w", err)
@@ -426,8 +446,13 @@ func (c *Client) GetToken(ctx context.Context, user string) (string, error) {
 
 		// update document, refresh token remains the same
 		newExpiresAt := time.Now().In(loc).Add(time.Duration(newToken.ExpiresIn) * time.Second)
+		encNewAccess, encErr := secrets.Encrypt(newToken.AccessToken)
+		if encErr != nil {
+			return "", fmt.Errorf("failed to encrypt refreshed access token; %w", encErr)
+		}
+
 		set := bson.M{
-			"access_token":    newToken.AccessToken,
+			"access_token":    encNewAccess,
 			"expires_at":      newExpiresAt,
 			"reauth_required": false,
 		}
