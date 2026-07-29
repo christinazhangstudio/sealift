@@ -133,6 +133,10 @@ func (s *Server) registerRoutes() {
 	// Catch-all
 	s.mux.HandleFunc("/", s.handleRoot)
 
+	// Health (unauthenticated — kubelet has no session)
+	s.mux.HandleFunc("GET /healthz", s.handleLiveness)
+	s.mux.HandleFunc("GET /readyz", s.handleReadiness)
+
 	// Auth
 	s.mux.HandleFunc("/api/revoke", s.handleRevoke)
 	s.mux.HandleFunc("/api/register-user", s.handleRegisterUser)

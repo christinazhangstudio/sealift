@@ -44,6 +44,13 @@ func (s *Server) authMiddleware() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		slog.Info("incoming request", "method", r.Method, "path", r.URL.Path)
 
+		// Health probes come from the kubelet, which has no session. Answer them
+		// before anything else and without logging, so they don't drown the log.
+		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
+			s.mux.ServeHTTP(w, r)
+			return
+		}
+
 		// non-API routes don't need auth
 		if !strings.HasPrefix(r.URL.Path, "/api/") &&
 			!strings.HasPrefix(r.URL.Path, "/sealift-webhook/") {
