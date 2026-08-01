@@ -39,6 +39,7 @@ netstat -aon | findstr 27017
 tasklist /FI "PID eq <pid_from_netstat_cmd>"
 Test-NetConnection -ComputerName 127.0.0.1 -Port 27017     # for firewall check
 ```
+(use `brew services start mongodb-community` for mac)
 
 mongo seems to default listen to IPv4:
 

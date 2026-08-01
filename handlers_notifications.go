@@ -76,9 +76,10 @@ func (s *Server) handleGetTopics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	topicSummaries := topicAvailability(topics, ebayScope)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(api.NotificationTopics{Topics: topics})
+	json.NewEncoder(w).Encode(api.NotificationTopics{Topics: topicSummaries})
 }
 
 // handleGetDestinations gets notification destinations (debug only).
@@ -214,7 +215,7 @@ func (s *Server) handleCreateSubscription(w http.ResponseWriter, r *http.Request
 	destinationID := sealiftUser.DestinationID
 	if destinationID == "" {
 		slog.Warn("tenant has no notification destination; creating one now", "tenantID", userID)
-		destinationID, err = s.ensureTenantDestination(r.Context(), dynamicClient, userID)
+		destinationID, err = s.ensureTenantDestination(r.Context(), dynamicClient, userID, sealiftUser.Email)
 		if err != nil {
 			slog.Error("failed to create tenant destination", "err", err, "tenantID", userID)
 			http.Error(w, "Could not create notification destination; please try again", http.StatusInternalServerError)
@@ -224,6 +225,23 @@ func (s *Server) handleCreateSubscription(w http.ResponseWriter, r *http.Request
 
 	userCtx := context.WithValue(r.Context(), auth.USER, user)
 	subID, err := dynamicClient.CreateUserSubscription(userCtx, req.TopicID, destinationID)
+	if ebay.IsAPIError(err, http.StatusConflict, ebay.NotificationConfigRequiredError) {
+		slog.Warn("notification config missing; creating it and retrying subscription", "tenantID", userID)
+		if configErr := dynamicClient.UpdateNotificationConfig(r.Context(), sealiftUser.Email); configErr != nil {
+			slog.Error("failed to configure notification alerts", "err", configErr, "tenantID", userID)
+			http.Error(w, "Could not configure eBay notification alerts", http.StatusBadGateway)
+			return
+		}
+		subID, err = dynamicClient.CreateUserSubscription(userCtx, req.TopicID, destinationID)
+	}
+	if ebay.IsAPIError(err, http.StatusForbidden, ebay.NotificationTopicForbiddenError) {
+		slog.Warn("seller is not authorized for notification topic", "topicId", req.TopicID, "user", user)
+		http.Error(w,
+			"This notification topic is not available for this seller. It may require additional eBay permissions or partner approval.",
+			http.StatusForbidden,
+		)
+		return
+	}
 	if err != nil {
 		slog.Error("failed to create subscription", "err", err, "user", user)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -233,6 +251,48 @@ func (s *Server) handleCreateSubscription(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(api.CreateUserSubscription{SubscriptionID: subID})
+}
+
+// topicAvailability keeps the full eBay topic catalog visible while marking
+// which topics this seller-token workflow can offer.
+func topicAvailability(topics []ebay.TopicResponse, configuredOAuthScopes string) []api.NotificationTopicSummary {
+	configured := make(map[string]struct{})
+	for _, scope := range strings.Fields(configuredOAuthScopes) {
+		configured[scope] = struct{}{}
+	}
+
+	summaries := make([]api.NotificationTopicSummary, 0, len(topics))
+	for _, topic := range topics {
+		summary := api.NotificationTopicSummary{
+			TopicResponse: topic,
+			CanSubscribe:  true,
+			Availability:  "available",
+		}
+
+		switch {
+		case !strings.EqualFold(topic.Status, "ENABLED"):
+			summary.CanSubscribe = false
+			summary.Availability = "unavailable"
+		case !strings.EqualFold(topic.Scope, "USER"):
+			summary.CanSubscribe = false
+			summary.Availability = "application"
+		case len(configured) > 0:
+			hasAllScopes := true
+			for _, required := range topic.AuthorizationScopes {
+				if _, ok := configured[required]; !ok {
+					hasAllScopes = false
+					break
+				}
+			}
+			if !hasAllScopes {
+				summary.CanSubscribe = false
+				summary.Availability = "not_authorized"
+			}
+		}
+
+		summaries = append(summaries, summary)
+	}
+	return summaries
 }
 
 // handleGetSubscriptions gets subscriptions for a seller.
@@ -246,7 +306,7 @@ func (s *Server) handleGetSubscriptions(w http.ResponseWriter, r *http.Request) 
 	slog.Info("received request for notification subscriptions", "user", user)
 
 	userID, _ := r.Context().Value("userId").(string)
-	dynamicClient, _, err := s.getEbayClientForUser(r.Context(), userID)
+	dynamicClient, sealiftUser, err := s.getEbayClientForUser(r.Context(), userID)
 	if err != nil {
 		slog.Error("Failed to build dynamic client for subscriptions list", "err", err, "userID", userID)
 		http.Error(w, "Failed to resolve credentials", http.StatusUnauthorized)
@@ -255,6 +315,15 @@ func (s *Server) handleGetSubscriptions(w http.ResponseWriter, r *http.Request) 
 
 	userCtx := context.WithValue(r.Context(), auth.USER, user)
 	subs, err := dynamicClient.GetUserSubscriptions(userCtx)
+	if ebay.IsAPIError(err, http.StatusConflict, ebay.NotificationConfigRequiredError) {
+		slog.Warn("notification config missing; creating it and retrying subscription list", "tenantID", userID)
+		if configErr := dynamicClient.UpdateNotificationConfig(r.Context(), sealiftUser.Email); configErr != nil {
+			slog.Error("failed to configure notification alerts", "err", configErr, "tenantID", userID)
+			http.Error(w, "Could not configure eBay notification alerts", http.StatusBadGateway)
+			return
+		}
+		subs, err = dynamicClient.GetUserSubscriptions(userCtx)
+	}
 	if err != nil {
 		slog.Error("failed to get subscriptions", "err", err, "user", user)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -485,7 +554,11 @@ func (s *Server) handleNotificationWebhook(w http.ResponseWriter, r *http.Reques
 // ensureTenantDestination creates the tenant's notification destination and
 // persists its ID, returning the new destination ID. Used to recover tenants
 // whose registration-time creation failed (see handleRegisterUser).
-func (s *Server) ensureTenantDestination(ctx context.Context, client *ebay.Client, tenantID string) (string, error) {
+func (s *Server) ensureTenantDestination(ctx context.Context, client *ebay.Client, tenantID, alertEmail string) (string, error) {
+	if err := client.UpdateNotificationConfig(ctx, alertEmail); err != nil {
+		return "", fmt.Errorf("configure notification alerts; %w", err)
+	}
+
 	destCtx := context.WithValue(ctx, auth.USER, tenantID)
 	destinationURL := fmt.Sprintf("%s/tenant/%s", endpointURL, tenantID)
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,6 +38,41 @@ type Client struct {
 	// Used for loading in the respective user
 	// token at API request time.
 	Auth *auth.Client
+}
+
+// APIError preserves the HTTP status and eBay error payload so callers can
+// recover from documented API conditions without matching error strings.
+type APIError struct {
+	StatusCode int
+	Body       []byte
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("API failed with status %d: %s", e.StatusCode, string(e.Body))
+}
+
+// IsAPIError reports whether err contains an eBay REST error with the given
+// HTTP status and errorId.
+func IsAPIError(err error, statusCode, errorID int) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != statusCode {
+		return false
+	}
+
+	var payload struct {
+		Errors []struct {
+			ErrorID int `json:"errorId"`
+		} `json:"errors"`
+	}
+	if json.Unmarshal(apiErr.Body, &payload) != nil {
+		return false
+	}
+	for _, detail := range payload.Errors {
+		if detail.ErrorID == errorID {
+			return true
+		}
+	}
+	return false
 }
 
 // doJSON handles the full lifecycle of a REST JSON API request.
@@ -77,7 +113,7 @@ func (c *Client) doJSON(
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API failed with status %d: %s", resp.StatusCode, string(b))
+		return &APIError{StatusCode: resp.StatusCode, Body: b}
 	}
 
 	if respBody != nil && resp.StatusCode != http.StatusNoContent {

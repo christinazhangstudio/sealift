@@ -14,7 +14,9 @@ import (
 )
 
 const (
-	notificationAPI = "/commerce/notification/v1/"
+	notificationAPI                 = "/commerce/notification/v1/"
+	NotificationConfigRequiredError = 195003
+	NotificationTopicForbiddenError = 195011
 )
 
 type TopicResponse struct {
@@ -80,6 +82,25 @@ type PublicKeyResponse struct {
 	Algorithm string `json:"algorithm"`
 	Digest    string `json:"digest"`
 	Key       string `json:"key"`
+}
+
+// UpdateNotificationConfig sets the application-level address eBay uses for
+// delivery alerts. eBay requires this config before subscription operations,
+// even when a destination and user token already exist.
+func (c *Client) UpdateNotificationConfig(ctx context.Context, alertEmail string) error {
+	if alertEmail == "" {
+		return fmt.Errorf("notification alert email is required")
+	}
+
+	token, err := c.Auth.GetApplicationToken(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get application token; %w", err)
+	}
+
+	url := c.NotificationURL + notificationAPI + "config"
+	return c.doJSON(ctx, http.MethodPut, url, token, map[string]string{
+		"alertEmail": alertEmail,
+	}, nil)
 }
 
 // GetTopic retrieves details for a specified notification topic.
@@ -262,7 +283,7 @@ func (c *Client) GetDestinations(ctx context.Context, pageSize int) (*Destinatio
 
 	url := fmt.Sprintf("%s%sdestination?limit=%d", c.NotificationURL, notificationAPI, pageSize)
 	var destResp DestinationsResponse
-	
+
 	if err := c.doJSON(ctx, http.MethodGet, url, token, nil, &destResp); err != nil {
 		return nil, err
 	}

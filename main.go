@@ -101,7 +101,6 @@ func main() {
 		httpClient:            sharedClient,
 		db:                    mongoDB,
 		sealiftUsersCol:       mongoDB.Collection("sealift_users"),
-		notesCol:              mongoDB.Collection("notes"),
 		ebayAccountsCol:       mongoDB.Collection("ebay_accounts"),
 		inboxReceiver:         receiver,
 		revokedTokensCol:      mongoDB.Collection("revoked_tokens"),

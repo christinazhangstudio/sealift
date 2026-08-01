@@ -164,7 +164,7 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	// Create tenant-level notification destination immediately. If this fails
 	// it is not fatal: subscribing later re-creates the destination on demand
 	// (see ensureTenantDestination).
-	go func(tenantID string) {
+	go func(tenantID, alertEmail string) {
 		slog.Info("registering tenant-level notification destination", "tenantID", tenantID)
 		dynamicClient, _, err := s.getEbayClientForUser(context.Background(), tenantID)
 		if err != nil {
@@ -172,10 +172,10 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if _, err := s.ensureTenantDestination(context.Background(), dynamicClient, tenantID); err != nil {
+		if _, err := s.ensureTenantDestination(context.Background(), dynamicClient, tenantID, alertEmail); err != nil {
 			slog.Warn("failed to create destination; will retry on first subscribe", "err", err, "tenantID", tenantID)
 		}
-	}(newTenantID)
+	}(newTenantID, user.Email)
 
 	json.NewEncoder(w).Encode(map[string]interface{}{"id": result.InsertedID})
 }
@@ -368,7 +368,7 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDeleteAccount permanently deletes the Sealift tenant and all associated resources.
-// Cleanup order: subscriptions → destination → ebay_accounts → inbox → notes → sealift_user
+// Cleanup order: subscriptions → destination → ebay_accounts → inbox → sealift_user
 func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -461,15 +461,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 6. Delete all notes for this tenant
-	notesResult, err := s.notesCol.DeleteMany(dbCtx, bson.M{"sealift_user_id": userID})
-	if err != nil {
-		slog.Warn("Failed to delete notes", "err", err, "tenantID", userID)
-	} else {
-		slog.Info("Deleted notes", "count", notesResult.DeletedCount, "tenantID", userID)
-	}
-
-	// 7. Delete the sealift_users document itself
+	// 6. Delete the sealift_users document itself
 	objID, err := primitive.ObjectIDFromHex(userID)
 	if err != nil {
 		slog.Error("Invalid tenant ObjectID during account deletion", "err", err, "tenantID", userID)

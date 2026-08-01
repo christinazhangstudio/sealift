@@ -22,7 +22,6 @@ type Server struct {
 	httpClient            *http.Client
 	db                    *mongo.Database
 	sealiftUsersCol       *mongo.Collection
-	notesCol              *mongo.Collection
 	ebayAccountsCol       *mongo.Collection // eBay specific
 	inboxReceiver         *inbox.Receiver
 	revokedTokensCol      *mongo.Collection
@@ -160,12 +159,6 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/payouts/{user}", s.handleGetPayouts)
 	s.mux.HandleFunc("GET /api/listings/{user}", s.handleGetListings)
 	s.mux.HandleFunc("GET /api/account/{user}", s.handleGetAccount)
-
-	// Notes
-	s.mux.HandleFunc("GET /api/notes", s.handleGetNotes)
-	s.mux.HandleFunc("POST /api/notes", s.handleCreateNote)
-	s.mux.HandleFunc("PUT /api/notes/{id}", s.handleUpdateNote)
-	s.mux.HandleFunc("DELETE /api/notes/{id}", s.handleDeleteNote)
 
 	// Notifications
 	s.mux.HandleFunc("GET /api/notification/topic/{topicId}", s.handleGetTopic)
