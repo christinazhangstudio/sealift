@@ -43,8 +43,14 @@ type NotificationTopic struct {
 	Topic *ebay.TopicResponse `json:"topic"`
 }
 
+type NotificationTopicSummary struct {
+	ebay.TopicResponse
+	CanSubscribe bool   `json:"canSubscribe"`
+	Availability string `json:"availability"`
+}
+
 type NotificationTopics struct {
-	Topics []ebay.TopicResponse `json:"topics"`
+	Topics []NotificationTopicSummary `json:"topics"`
 }
 
 // ebay.DestinationsResponse is App-level, but we want

@@ -8,10 +8,6 @@ Buyer messages and other eBay notifications arrive here in real time, without ne
 
 Messages only arrive for sellers you have subscribed to notifications for — see the Notifications page. If your inbox is empty and you expect messages, check that the seller has an active subscription there.
 
-## Notes
-
-Sticky notes for your own reference, in five colours. Notes are private to your Sealift account and are not shared with eBay or with other users. Click a note to expand and edit it, or use the copy button to put its text on your clipboard.
-
 ## Create Listing
 
 Upload or drag in a photo of an item, and Sealift uses AI vision to draft listing copy for it — a short description written in a plain, eBay-style tone. You can edit the generated text, add a title and price, and use the Regenerate button to try a different wording for the same photo. The Copy button puts the whole listing on your clipboard so you can paste it into eBay or anywhere else.

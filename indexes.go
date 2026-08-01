@@ -60,14 +60,6 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) {
 			why: "trash / mark read / delete, which match on both fields",
 		},
 		{
-			collection: "notes",
-			model: mongo.IndexModel{
-				Keys:    bson.D{{Key: "sealift_user_id", Value: 1}},
-				Options: options.Index().SetName("tenant"),
-			},
-			why: "every notes read is scoped to one tenant",
-		},
-		{
 			collection: "revoked_tokens",
 			model: mongo.IndexModel{
 				Keys:    bson.D{{Key: "jti", Value: 1}},

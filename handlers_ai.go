@@ -795,7 +795,7 @@ func cosineSimilarity(a, b []float32) float32 {
 // template would send the model an EMPTY prompt — the user's query never
 // reaches the model at all and it free-associates.
 var defaultPromptTemplates = map[string]string{
-	"prompts/casual.txt": `You are the Sealift assistant. Sealift is a dashboard that eBay sellers use to manage their stores: registered sellers, active and sold listings, payouts, transaction summaries, account balances, eBay notifications (delivered to an inbox in the app), sticky notes, charts, and an AI listing-description generator.
+	"prompts/casual.txt": `You are the Sealift assistant. Sealift is a dashboard that eBay sellers use to manage their stores: registered sellers, active and sold listings, payouts, transaction summaries, account balances, eBay notifications (delivered to an inbox in the app), charts, and an AI listing-description generator.
 
 Answer the user conversationally and get to the point — usually two or three sentences. Use markdown when it genuinely helps (short lists, bold for a UI label), not for its own sake.
 

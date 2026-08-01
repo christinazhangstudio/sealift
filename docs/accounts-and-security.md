@@ -22,7 +22,7 @@ Treat your Cert ID like a password — anyone who has it can act as your eBay ap
 
 ## Multiple sellers, one account
 
-One Sealift account can hold several eBay seller accounts. Every seller you add is scoped to your Sealift account; other Sealift users cannot see your sellers, listings, payouts, notes or messages.
+One Sealift account can hold several eBay seller accounts. Every seller you add is scoped to your Sealift account; other Sealift users cannot see your sellers, listings, payouts or messages.
 
 ## Guest mode
 
@@ -30,4 +30,4 @@ Signing in as a guest lets you look around without creating an account. Guests c
 
 ## Deleting your account
 
-The Admin page permanently deletes your Sealift account: your seller connections, stored tokens, notes and notifications. It cannot be undone. Your eBay account and listings are unaffected — deleting from Sealift only removes Sealift's access.
+The Admin page permanently deletes your Sealift account: your seller connections, stored tokens and notifications. It cannot be undone. Your eBay account and listings are unaffected — deleting from Sealift only removes Sealift's access.
