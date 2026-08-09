@@ -17,7 +17,6 @@ import (
 	"github.tesla.com/chrzhang/sealift/auth"
 	"github.tesla.com/chrzhang/sealift/ebay"
 	"github.tesla.com/chrzhang/sealift/html"
-	"github.tesla.com/chrzhang/sealift/secrets"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -136,15 +135,6 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 			http.StatusBadRequest)
 		return
 	}
-
-	// Encrypt only after validation, which needs the real value.
-	encryptedCert, err := secrets.Encrypt(user.EbayDeveloperConfig.CertID)
-	if err != nil {
-		slog.Error("failed to encrypt eBay credentials", "err", err)
-		http.Error(w, "Internal server error", http.StatusInternalServerError)
-		return
-	}
-	user.EbayDeveloperConfig.CertID = encryptedCert
 
 	user.CreatedAt = time.Now()
 	result, err := s.sealiftUsersCol.InsertOne(r.Context(), user)

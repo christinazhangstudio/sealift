@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/alexedwards/argon2id"
-	"github.tesla.com/chrzhang/sealift/secrets"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -42,13 +41,6 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := user.EbayDeveloperConfig
-	// Decrypt only to derive the masked hint; the value itself is never sent.
-	if plain, err := secrets.Decrypt(cfg.CertID); err == nil {
-		cfg.CertID = plain
-	} else {
-		slog.Warn("could not decrypt cert id for masking", "err", err, "userID", userID)
-		cfg.CertID = ""
-	}
 
 	json.NewEncoder(w).Encode(map[string]any{
 		"email":     user.Email,
@@ -175,11 +167,7 @@ func (s *Server) handleUpdateEbayConfig(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "Account not found", http.StatusNotFound)
 			return
 		}
-		if certForCheck, err = secrets.Decrypt(current.EbayDeveloperConfig.CertID); err != nil {
-			slog.Error("failed to decrypt stored cert id", "err", err, "userID", userID)
-			http.Error(w, "Could not read stored eBay settings", http.StatusInternalServerError)
-			return
-		}
+		certForCheck = current.EbayDeveloperConfig.CertID
 	}
 
 	// Same check as registration: don't let Settings brick an account.
@@ -206,13 +194,7 @@ func (s *Server) handleUpdateEbayConfig(w http.ResponseWriter, r *http.Request) 
 	// An empty Cert ID means "leave it alone" — the settings page shows only a
 	// masked hint, so the user can't retype a value they can't see.
 	if req.CertID != "" {
-		encrypted, err := secrets.Encrypt(req.CertID)
-		if err != nil {
-			slog.Error("failed to encrypt eBay credentials", "err", err, "userID", userID)
-			http.Error(w, "Could not save eBay settings", http.StatusInternalServerError)
-			return
-		}
-		update["ebayDeveloperConfig.certId"] = encrypted
+		update["ebayDeveloperConfig.certId"] = req.CertID
 	}
 
 	if _, err := s.sealiftUsersCol.UpdateOne(r.Context(), bson.M{"_id": objID}, bson.M{"$set": update}); err != nil {
