@@ -543,11 +543,12 @@ func (s *Server) handleNotificationWebhook(w http.ResponseWriter, r *http.Reques
 
 		ebayUser := ""
 		if payload.Notification.NotificationID != "" {
+			correlationIDs := notificationTestCorrelationIDs(payload.Notification.NotificationID)
 			var testDelivery struct {
 				User string `bson:"user"`
 			}
 			err := s.notificationTestsCol.FindOneAndDelete(r.Context(), bson.M{
-				"notificationId": payload.Notification.NotificationID,
+				"notificationId": bson.M{"$in": correlationIDs},
 				"tenantId":       tenantID,
 			}).Decode(&testDelivery)
 			switch {
@@ -595,6 +596,19 @@ func (s *Server) handleNotificationWebhook(w http.ResponseWriter, r *http.Reques
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// notificationTestCorrelationIDs returns every ID that can identify an eBay
+// test delivery. The test-subscription response returns a UUID, while the
+// webhook appends an underscore and a second delivery UUID to that value.
+// Store the response UUID as the correlation key and look up both forms when
+// the webhook arrives.
+func notificationTestCorrelationIDs(deliveredID string) []string {
+	ids := []string{deliveredID}
+	if baseID, _, hasSuffix := strings.Cut(deliveredID, "_"); hasSuffix && baseID != "" {
+		ids = append(ids, baseID)
+	}
+	return ids
 }
 
 // ensureTenantDestination creates the tenant's notification destination and

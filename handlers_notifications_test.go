@@ -45,3 +45,39 @@ func TestTopicAvailabilityWithoutConfiguredScopes(t *testing.T) {
 		t.Fatalf("expected eBay to decide authorization when scopes are undeclared: %#v", got)
 	}
 }
+
+func TestNotificationTestCorrelationIDs(t *testing.T) {
+	const baseID = "10e0493b-cd90-4dbf-bec6-1af455206255"
+	const deliveredID = baseID + "_c1b80d3f-d78f-4fd2-b46c-37a990444ec3"
+
+	tests := []struct {
+		name string
+		id   string
+		want []string
+	}{
+		{
+			name: "test response ID",
+			id:   baseID,
+			want: []string{baseID},
+		},
+		{
+			name: "webhook delivery ID",
+			id:   deliveredID,
+			want: []string{deliveredID, baseID},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := notificationTestCorrelationIDs(tt.id)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("got %v, want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}
