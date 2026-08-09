@@ -147,7 +147,7 @@ func (c *Client) GetTopics(ctx context.Context) ([]TopicResponse, error) {
 		return nil, fmt.Errorf("failed to get or refresh user token; %w", err)
 	}
 
-	url := c.NotificationURL + notificationAPI + "topic"
+	url := c.NotificationURL + notificationAPI + "topic?limit=100"
 	var topicsResp struct {
 		Topics []TopicResponse `json:"topics"`
 	}

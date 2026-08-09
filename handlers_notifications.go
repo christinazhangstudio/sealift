@@ -169,6 +169,19 @@ func (s *Server) handleDeleteTenantDestination(w http.ResponseWriter, r *http.Re
 		}
 	}
 
+	if deletedCount > 0 && errCount == 0 {
+		objID, err := primitive.ObjectIDFromHex(userID)
+		if err == nil {
+			_, err = s.sealiftUsersCol.UpdateOne(r.Context(),
+				bson.M{"_id": objID},
+				bson.M{"$unset": bson.M{"destinationID": ""}},
+			)
+			if err != nil {
+				slog.Error("failed to clear destination ID in database", "err", err, "userID", userID)
+			}
+		}
+	}
+
 	resp := map[string]interface{}{
 		"deleted_count": deletedCount,
 		"error_count":   errCount,
