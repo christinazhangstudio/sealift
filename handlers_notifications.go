@@ -20,10 +20,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"github.tesla.com/chrzhang/sealift/api"
 	"github.tesla.com/chrzhang/sealift/auth"
@@ -443,16 +445,39 @@ func (s *Server) handleTestSubscription(w http.ResponseWriter, r *http.Request) 
 	}
 
 	userCtx := context.WithValue(r.Context(), auth.USER, user)
-	err = dynamicClient.TestUserSubscription(userCtx, subscriptionID)
+	notificationID, err := dynamicClient.TestUserSubscription(userCtx, subscriptionID)
 	if err != nil {
 		slog.Error("failed to test subscription", "err", err, "user", user)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	slog.Info("triggered test payload for subscription", "subscriptionId", subscriptionID, "user", user)
+	slog.Info("triggered test payload for subscription", "subscriptionId", subscriptionID,
+		"notificationId", notificationID, "user", user)
 
-	w.WriteHeader(http.StatusNoContent)
+	// Test payloads contain mocked/anonymized user data, so sender and recipient
+	// cannot reliably identify the registered seller. Keep a short-lived mapping
+	// from eBay's test notification ID to the seller that requested it. MongoDB is
+	// used rather than process memory so this also works across multiple replicas.
+	if notificationID != "" {
+		if _, err := s.notificationTestsCol.UpdateOne(r.Context(),
+			bson.M{"notificationId": notificationID},
+			bson.M{"$set": bson.M{
+				"notificationId": notificationID,
+				"tenantId":       userID,
+				"user":           user,
+				"createdAt":      time.Now(),
+			}},
+			options.Update().SetUpsert(true),
+		); err != nil {
+			slog.Error("failed to save notification test correlation", "err", err,
+				"notificationId", notificationID, "user", user)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"notificationId": notificationID})
 }
 
 // handleNotificationWebhook handles webhooks for all seller notifications under a Sealift Tenant.
@@ -516,7 +541,28 @@ func (s *Server) handleNotificationWebhook(w http.ResponseWriter, r *http.Reques
 		recipient := payload.Notification.Data.RecipientUserName
 		sender := payload.Notification.Data.SenderUserName
 
-		ebayUser := s.resolveInboxOwner(r.Context(), tenantID, recipient, sender)
+		ebayUser := ""
+		if payload.Notification.NotificationID != "" {
+			var testDelivery struct {
+				User string `bson:"user"`
+			}
+			err := s.notificationTestsCol.FindOneAndDelete(r.Context(), bson.M{
+				"notificationId": payload.Notification.NotificationID,
+				"tenantId":       tenantID,
+			}).Decode(&testDelivery)
+			switch {
+			case err == nil:
+				ebayUser = testDelivery.User
+				slog.Info("matched eBay test notification to seller", "notificationId",
+					payload.Notification.NotificationID, "user", ebayUser, "tenantID", tenantID)
+			case err != mongo.ErrNoDocuments:
+				slog.Warn("could not look up notification test correlation", "err", err,
+					"notificationId", payload.Notification.NotificationID, "tenantID", tenantID)
+			}
+		}
+		if ebayUser == "" {
+			ebayUser = s.resolveInboxOwner(r.Context(), tenantID, recipient, sender)
+		}
 		if ebayUser == "" {
 			slog.Error("Webhook error: no inbox owner in payload",
 				"tenantID", tenantID, "recipient", recipient, "sender", sender,

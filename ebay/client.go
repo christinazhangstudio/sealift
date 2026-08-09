@@ -117,7 +117,7 @@ func (c *Client) doJSON(
 	}
 
 	if respBody != nil && resp.StatusCode != http.StatusNoContent {
-		if err := json.NewDecoder(resp.Body).Decode(respBody); err != nil {
+		if err := json.NewDecoder(resp.Body).Decode(respBody); err != nil && !errors.Is(err, io.EOF) {
 			return fmt.Errorf("failed to parse response; %w", err)
 		}
 	}

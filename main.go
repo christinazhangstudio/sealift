@@ -108,6 +108,7 @@ func main() {
 		knowledgeBaseAtlasCol: mongoKnowledgeBaseAtlas,
 		oauthStatesCol:        mongoDB.Collection("oauth_states"),
 		passwordResetsCol:     mongoDB.Collection("password_resets"),
+		notificationTestsCol:  mongoDB.Collection("notification_tests"),
 	}
 
 	// Bring any pre-encryption credentials up to date before serving traffic.

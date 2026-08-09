@@ -29,6 +29,7 @@ type Server struct {
 	knowledgeBaseAtlasCol *mongo.Collection
 	oauthStatesCol        *mongo.Collection
 	passwordResetsCol     *mongo.Collection
+	notificationTestsCol  *mongo.Collection
 }
 
 // getEbayClientForUser builds an eBay client

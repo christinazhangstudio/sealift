@@ -85,6 +85,14 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) {
 			why: "reset links are redeemed by token hash",
 		},
 		{
+			collection: "notification_tests",
+			model: mongo.IndexModel{
+				Keys:    bson.D{{Key: "notificationId", Value: 1}},
+				Options: options.Index().SetUnique(true).SetName("notification_test_unique"),
+			},
+			why: "match an eBay test payload to the seller that requested it",
+		},
+		{
 			collection: "knowledge_base",
 			model: mongo.IndexModel{
 				Keys:    bson.D{{Key: "model", Value: 1}},
@@ -120,6 +128,14 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) {
 				Options: options.Index().SetExpireAfterSeconds(2 * 60 * 60),
 			},
 			why: "reset links are valid for an hour; clean up shortly after",
+		},
+		{
+			collection: "notification_tests",
+			model: mongo.IndexModel{
+				Keys:    bson.D{{Key: "createdAt", Value: 1}},
+				Options: options.Index().SetExpireAfterSeconds(10 * 60),
+			},
+			why: "test-delivery correlation is only needed while eBay queues the payload",
 		},
 	}
 

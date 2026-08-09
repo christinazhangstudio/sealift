@@ -1,0 +1,23 @@
+# Version-control and editor metadata
+.git
+.gitignore
+.github
+.idea
+.vscode
+.DS_Store
+
+# Local configuration and secrets
+.env
+.env.*
+run.sh
+run.ps1
+*.key
+*.pem
+
+# Logs, test output, and build artifacts
+*.log
+coverage.out
+bin/
+dist/
+tmp/
+sealift

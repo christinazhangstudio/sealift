@@ -448,15 +448,22 @@ func (c *Client) EnableUserSubscriptions(ctx context.Context) ([]SubscriptionRes
 	return subs, nil
 }
 
-// TestUserSubscription triggers a test notification payload for a given subscription.
+// TestUserSubscription triggers a test notification payload for a given subscription
+// and returns the notification ID eBay assigns to the mocked delivery.
 // https://developer.ebay.com/api-docs/commerce/notification/resources/subscription/methods/testSubscription
-func (c *Client) TestUserSubscription(ctx context.Context, subscriptionID string) error {
+func (c *Client) TestUserSubscription(ctx context.Context, subscriptionID string) (string, error) {
 	user := ctx.Value(auth.USER).(string)
 	token, err := c.Auth.GetToken(ctx, user)
 	if err != nil {
-		return fmt.Errorf("failed to get or refresh user token: %w", err)
+		return "", fmt.Errorf("failed to get or refresh user token: %w", err)
 	}
 
 	url := c.NotificationURL + notificationAPI + "subscription/" + subscriptionID + "/test"
-	return c.doJSON(ctx, http.MethodPost, url, token, nil, nil)
+	var response struct {
+		NotificationID string `json:"notificationId"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, url, token, nil, &response); err != nil {
+		return "", err
+	}
+	return response.NotificationID, nil
 }
