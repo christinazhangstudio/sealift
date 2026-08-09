@@ -51,6 +51,15 @@ type Receiver struct {
 	streamer
 }
 
+// HistoricalNotification is an eBay Message API record normalized to the same
+// payload shape used by NEW_MESSAGE webhooks.
+type HistoricalNotification struct {
+	MessageID string
+	Payload   map[string]interface{}
+	CreatedAt time.Time
+	Read      bool
+}
+
 type streamer struct {
 	conns     map[string][]chan map[string]interface{}
 	connMutex sync.Mutex
@@ -85,9 +94,24 @@ func (r *Receiver) PushNotification(
 		"createdAt": createdAt,
 	}
 
-	_, err := r.DB.InsertOne(ctx, doc)
-	if err != nil {
-		return fmt.Errorf("failed to insert notification to mongo: %w", err)
+	messageID := notificationMessageID(notif)
+	if messageID != "" {
+		doc["sourceMessageId"] = messageID
+		result, err := r.DB.UpdateOne(ctx, messageIDFilter(user, messageID), bson.M{
+			"$setOnInsert": doc,
+		}, options.Update().SetUpsert(true))
+		if err != nil {
+			return fmt.Errorf("failed to upsert notification in mongo: %w", err)
+		}
+		// eBay retries webhook deliveries. An already stored message should not
+		// be broadcast again or appear twice in the inbox.
+		if result.UpsertedCount == 0 {
+			return nil
+		}
+	} else {
+		if _, err := r.DB.InsertOne(ctx, doc); err != nil {
+			return fmt.Errorf("failed to insert notification to mongo: %w", err)
+		}
 	}
 
 	// SSE broadcast
@@ -96,6 +120,78 @@ func (r *Receiver) PushNotification(
 	}
 
 	return nil
+}
+
+// UpsertHistoricalNotifications reconciles Message API history into the same
+// collection used by webhook notifications. It returns only newly inserted
+// payloads so the SSE handler can append them without replaying duplicates.
+func (r *Receiver) UpsertHistoricalNotifications(
+	ctx context.Context,
+	user string,
+	notifications []HistoricalNotification,
+) ([]map[string]interface{}, error) {
+	inserted := make([]map[string]interface{}, 0)
+	for _, notification := range notifications {
+		if notification.MessageID == "" {
+			continue
+		}
+
+		doc := bson.M{
+			"user":      user,
+			"payload":   notification.Payload,
+			"createdAt": notification.CreatedAt,
+		}
+		update := bson.M{
+			"$setOnInsert": doc,
+			"$set": bson.M{
+				"sourceMessageId": notification.MessageID,
+			},
+		}
+		// eBay knowing a message is read may advance local state, but an older
+		// unread snapshot must never undo a read performed inside Sealift.
+		if notification.Read {
+			update["$set"].(bson.M)["read"] = true
+		}
+
+		result, err := r.DB.UpdateOne(
+			ctx,
+			messageIDFilter(user, notification.MessageID),
+			update,
+			options.Update().SetUpsert(true),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("upsert historical message %s: %w", notification.MessageID, err)
+		}
+		if result.UpsertedCount > 0 {
+			notification.Payload["sealift_read"] = notification.Read
+			notification.Payload["sealift_trashed"] = false
+			inserted = append(inserted, notification.Payload)
+		}
+	}
+	return inserted, nil
+}
+
+func messageIDFilter(user string, messageID string) bson.M {
+	return bson.M{
+		"user": user,
+		"$or": bson.A{
+			bson.M{"sourceMessageId": messageID},
+			bson.M{"payload.notification.data.messageId": messageID},
+		},
+	}
+}
+
+func notificationMessageID(notif map[string]interface{}) string {
+	notification, ok := notif["notification"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	data, ok := notification["data"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	messageID, _ := data["messageId"].(string)
+	return messageID
 }
 
 func (s *streamer) broadcast(user string, notif map[string]interface{}) error {
@@ -120,12 +216,12 @@ func (s *streamer) broadcast(user string, notif map[string]interface{}) error {
 	return nil
 }
 
-// GetPastNotifications returns the recent notifications (max 50) for a user from MongoDB.
+// GetPastNotifications returns the recent notifications (max 200) for a user from MongoDB.
 func (r *Receiver) GetPastNotifications(
 	ctx context.Context,
 	user string,
 ) ([]map[string]interface{}, error) {
-	opts := options.Find().SetSort(bson.D{{Key: "createdAt", Value: -1}}).SetLimit(50)
+	opts := options.Find().SetSort(bson.D{{Key: "createdAt", Value: -1}}).SetLimit(200)
 	filter := bson.D{{Key: "user", Value: user}}
 
 	result, err := r.DB.Find(ctx, filter, opts)

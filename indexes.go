@@ -60,6 +60,22 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) {
 			why: "trash / mark read / delete, which match on both fields",
 		},
 		{
+			collection: "inbox",
+			model: mongo.IndexModel{
+				Keys: bson.D{
+					{Key: "user", Value: 1},
+					{Key: "sourceMessageId", Value: 1},
+				},
+				Options: options.Index().
+					SetName("user_source_message_unique").
+					SetUnique(true).
+					SetPartialFilterExpression(bson.M{
+						"sourceMessageId": bson.M{"$type": "string"},
+					}),
+			},
+			why: "deduplicate Message API history against NEW_MESSAGE webhooks",
+		},
+		{
 			collection: "revoked_tokens",
 			model: mongo.IndexModel{
 				Keys:    bson.D{{Key: "jti", Value: 1}},

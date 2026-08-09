@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.tesla.com/chrzhang/sealift/ebay"
+	"github.tesla.com/chrzhang/sealift/inbox"
 	"go.mongodb.org/mongo-driver/bson"
 )
 
@@ -145,7 +149,7 @@ func (s *Server) handleSSEStream(w http.ResponseWriter, r *http.Request) {
 	// Establish the stream immediately. Without this the response headers are
 	// withheld until the first notification arrives, which browsers and proxies
 	// treat as a hung request and retry.
-	fmt.Fprint(w, ": connected\n\n")
+	fmt.Fprint(w, "retry: 5000\n: connected\n\n")
 	flusher.Flush()
 
 	userWebhooks, err := s.inboxReceiver.GetPastNotifications(r.Context(), ebayUser)
@@ -158,6 +162,19 @@ func (s *Server) handleSSEStream(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "event: initial\ndata: %s\n\n", data)
 	flusher.Flush()
 
+	// Reconcile eBay's Message API in the background so historical retrieval
+	// never delays or breaks the existing stream. Newly discovered messages are
+	// emitted as one batch after they have been persisted in MongoDB.
+	type historyResult struct {
+		payloads []map[string]interface{}
+		err      error
+	}
+	historyChan := make(chan historyResult, 1)
+	go func() {
+		payloads, err := s.syncEbayMessageHistory(r.Context(), userID, ebayUser)
+		historyChan <- historyResult{payloads: payloads, err: err}
+	}()
+
 	// Cloudflare drops idle connections after ~100s; heartbeat well inside that
 	// so the stream survives quiet periods instead of reconnect-looping.
 	heartbeat := time.NewTicker(25 * time.Second)
@@ -169,6 +186,17 @@ func (s *Server) handleSSEStream(w http.ResponseWriter, r *http.Request) {
 			data, _ := json.Marshal(msg)
 			fmt.Fprintf(w, "event: message\ndata: %s\n\n", data)
 			flusher.Flush()
+		case result := <-historyChan:
+			if result.err != nil {
+				slog.Warn("eBay message history reconciliation failed", "err", result.err, "user", ebayUser)
+			} else if len(result.payloads) > 0 {
+				data, _ := json.Marshal(result.payloads)
+				fmt.Fprintf(w, "event: history\ndata: %s\n\n", data)
+				flusher.Flush()
+				slog.Info("reconciled eBay message history", "user", ebayUser, "inserted", len(result.payloads))
+			}
+			// A nil channel disables this select case after the one sync result.
+			historyChan = nil
 		case <-heartbeat.C:
 			fmt.Fprint(w, ": keepalive\n\n")
 			flusher.Flush()
@@ -176,4 +204,115 @@ func (s *Server) handleSSEStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// syncEbayMessageHistory imports messages eBay still exposes into the same
+// collection and payload contract used by NEW_MESSAGE webhooks. The first run
+// is a full backfill; later runs overlap by a day to cover delayed updates.
+func (s *Server) syncEbayMessageHistory(
+	ctx context.Context,
+	tenantID string,
+	ebayUser string,
+) ([]map[string]interface{}, error) {
+	client, _, err := s.getEbayClientForUser(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	var account struct {
+		MessageHistorySyncedAt time.Time `bson:"message_history_synced_at"`
+	}
+	if err := s.ebayAccountsCol.FindOne(ctx, bson.M{
+		"user": ebayUser, "sealift_user_id": tenantID,
+	}).Decode(&account); err != nil {
+		return nil, fmt.Errorf("load message sync state: %w", err)
+	}
+
+	syncStartedAt := time.Now().UTC()
+	var start *time.Time
+	if !account.MessageHistorySyncedAt.IsZero() {
+		overlapStart := account.MessageHistorySyncedAt.Add(-24 * time.Hour)
+		start = &overlapStart
+	}
+
+	history, err := client.GetMessageHistory(ctx, ebayUser, start, syncStartedAt)
+	if err != nil {
+		return nil, err
+	}
+
+	notifications := make([]inbox.HistoricalNotification, 0, len(history))
+	for _, item := range history {
+		notification, ok := historicalNotification(ebayUser, item, syncStartedAt)
+		if ok {
+			notifications = append(notifications, notification)
+		}
+	}
+
+	inserted, err := s.inboxReceiver.UpsertHistoricalNotifications(ctx, ebayUser, notifications)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.ebayAccountsCol.UpdateOne(ctx, bson.M{
+		"user": ebayUser, "sealift_user_id": tenantID,
+	}, bson.M{"$set": bson.M{"message_history_synced_at": syncStartedAt}}); err != nil {
+		return nil, fmt.Errorf("save message sync state: %w", err)
+	}
+	return inserted, nil
+}
+
+func historicalNotification(
+	ebayUser string,
+	item ebay.MessageHistoryItem,
+	fallbackDate time.Time,
+) (inbox.HistoricalNotification, bool) {
+	message := item.Message
+	if strings.TrimSpace(message.MessageID) == "" {
+		return inbox.HistoricalNotification{}, false
+	}
+
+	createdAt, err := time.Parse(time.RFC3339, message.CreatedDate)
+	if err != nil {
+		createdAt = fallbackDate
+	}
+	read := message.ReadStatus || strings.EqualFold(message.SenderUsername, ebayUser)
+
+	data := map[string]interface{}{
+		"conversationId":    item.ConversationID,
+		"conversationType":  item.ConversationType,
+		"createdDate":       message.CreatedDate,
+		"messageBody":       message.MessageBody,
+		"messageId":         message.MessageID,
+		"messageMedia":      message.MessageMedia,
+		"readStatus":        message.ReadStatus,
+		"recipientUserName": message.RecipientUsername,
+		"senderUserName":    message.SenderUsername,
+		"subject":           message.Subject,
+	}
+	if item.ReferenceID != "" {
+		data["referenceId"] = item.ReferenceID
+		data["referenceType"] = item.ReferenceType
+	}
+
+	payload := map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"deprecated":    false,
+			"schemaVersion": "1.0",
+			"source":        "MESSAGE_API",
+			"topic":         "NEW_MESSAGE",
+		},
+		"notification": map[string]interface{}{
+			"data":                data,
+			"eventDate":           createdAt.UTC().Format(time.RFC3339Nano),
+			"notificationId":      "ebay-message-" + message.MessageID,
+			"publishAttemptCount": 1,
+			"publishDate":         createdAt.UTC().Format(time.RFC3339Nano),
+		},
+	}
+
+	return inbox.HistoricalNotification{
+		MessageID: message.MessageID,
+		Payload:   payload,
+		CreatedAt: createdAt,
+		Read:      read,
+	}, true
 }
