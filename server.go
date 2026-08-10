@@ -180,6 +180,7 @@ func (s *Server) registerRoutes() {
 	// AI
 	s.mux.HandleFunc("POST /api/ai/ingest", s.handleAIIngest)
 	s.mux.HandleFunc("GET /api/ai/ask", s.handleAIAsk)
+	s.mux.HandleFunc("POST /api/ai/inbox-rules", s.handleAIInboxRules)
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {

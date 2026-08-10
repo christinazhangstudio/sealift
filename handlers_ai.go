@@ -438,6 +438,13 @@ func getCompletion(query string, contextText string, isCasual bool) (string, str
 	} else {
 		prompt = loadPromptTemplate("prompts/rag.txt", map[string]string{"Query": query, "Context": contextText})
 	}
+	return getPromptCompletion(prompt, true, 0)
+}
+
+// getPromptCompletion sends a fully formed prompt to the configured provider.
+// Structured tasks disable Qwen thinking and cap output so they complete within
+// a normal request instead of spending tokens on reasoning the client discards.
+func getPromptCompletion(prompt string, enableThinking bool, maxTokens int) (string, string, error) {
 
 	cloudKey := openAIAPIKey
 	useSelfHosted := useSelfHostedAI == "true"
@@ -477,10 +484,14 @@ func getCompletion(query string, contextText string, isCasual bool) (string, str
 				{"role": "user", "content": prompt},
 			},
 		}
+		if maxTokens > 0 {
+			payload["max_tokens"] = maxTokens
+			payload["temperature"] = 0.1
+		}
 		if useSelfHosted {
-			// Hybrid-reasoning models (Qwen 3.x) only think when the chat template
-			// enables it; llama-server then returns reasoning_content separately.
-			payload["chat_template_kwargs"] = map[string]any{"enable_thinking": true}
+			// Hybrid-reasoning models (Qwen 3.x) expose thinking through the
+			// chat template. Structured classification deliberately disables it.
+			payload["chat_template_kwargs"] = map[string]any{"enable_thinking": enableThinking}
 		}
 		body, _ := json.Marshal(payload)
 
