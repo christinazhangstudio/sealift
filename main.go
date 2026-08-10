@@ -102,6 +102,7 @@ func main() {
 		oauthStatesCol:        mongoDB.Collection("oauth_states"),
 		passwordResetsCol:     mongoDB.Collection("password_resets"),
 		notificationTestsCol:  mongoDB.Collection("notification_tests"),
+		inboxAnalysisStore:    mongoInboxAnalysisStore{collection: mongoDB.Collection("inbox_rule_suggestions")},
 	}
 
 	srv.registerRoutes()

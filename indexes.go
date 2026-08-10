@@ -117,6 +117,15 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) {
 			why: "retrieval only considers vectors from the current embedding model",
 		},
 
+		{
+			collection: "inbox_rule_suggestions",
+			model: mongo.IndexModel{
+				Keys:    bson.D{{Key: "tenantId", Value: 1}},
+				Options: options.Index().SetUnique(true).SetName("tenant_inbox_rules_unique"),
+			},
+			why: "load and replace the latest Qwen inbox rule suggestions for one tenant",
+		},
+
 		// TTL indexes: these expire documents, they don't serve lookups. Left
 		// unnamed so they match the default-named ones already in the database —
 		// asking for a different name on the same keys is a conflict, not a

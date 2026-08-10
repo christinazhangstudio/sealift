@@ -29,6 +29,7 @@ type Server struct {
 	oauthStatesCol        *mongo.Collection
 	passwordResetsCol     *mongo.Collection
 	notificationTestsCol  *mongo.Collection
+	inboxAnalysisStore    inboxAnalysisStore
 }
 
 // getEbayClientForUser builds an eBay client
@@ -180,7 +181,9 @@ func (s *Server) registerRoutes() {
 	// AI
 	s.mux.HandleFunc("POST /api/ai/ingest", s.handleAIIngest)
 	s.mux.HandleFunc("GET /api/ai/ask", s.handleAIAsk)
+	s.mux.HandleFunc("GET /api/ai/inbox-rules", s.handleGetAIInboxRules)
 	s.mux.HandleFunc("POST /api/ai/inbox-rules", s.handleAIInboxRules)
+	s.mux.HandleFunc("PUT /api/ai/inbox-rules", s.handleSetAIInboxRuleApplied)
 }
 
 func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {

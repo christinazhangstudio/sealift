@@ -1,13 +1,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
+
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 const (
@@ -23,23 +29,166 @@ type inboxAnalysisMessage struct {
 }
 
 type inboxRuleSuggestion struct {
-	ID          string   `json:"id"`
-	Title       string   `json:"title"`
-	Description string   `json:"description"`
-	Destination string   `json:"destination"`
-	Conditions  []string `json:"conditions"`
-	MatchingIDs []string `json:"matchingIds"`
+	ID          string   `bson:"id" json:"id"`
+	Title       string   `bson:"title" json:"title"`
+	Description string   `bson:"description" json:"description"`
+	Destination string   `bson:"destination" json:"destination"`
+	Conditions  []string `bson:"conditions" json:"conditions"`
+	MatchingIDs []string `bson:"matchingIds" json:"matchingIds"`
 }
 
 type inboxAnalysisResponse struct {
-	Model       string                `json:"model"`
-	Suggestions []inboxRuleSuggestion `json:"suggestions"`
+	Model         string                `json:"model"`
+	Suggestions   []inboxRuleSuggestion `json:"suggestions"`
+	ActiveRuleIDs []string              `json:"activeRuleIds"`
+	UpdatedAt     *time.Time            `json:"updatedAt,omitempty"`
+}
+
+type storedInboxAnalysis struct {
+	TenantID      string                `bson:"tenantId"`
+	Model         string                `bson:"model"`
+	Suggestions   []inboxRuleSuggestion `bson:"suggestions"`
+	ActiveRuleIDs []string              `bson:"activeRuleIds"`
+	UpdatedAt     time.Time             `bson:"updatedAt"`
+}
+
+func (analysis storedInboxAnalysis) response() inboxAnalysisResponse {
+	activeRuleIDs := analysis.ActiveRuleIDs
+	if activeRuleIDs == nil {
+		activeRuleIDs = []string{}
+	}
+	response := inboxAnalysisResponse{
+		Model:         analysis.Model,
+		Suggestions:   analysis.Suggestions,
+		ActiveRuleIDs: activeRuleIDs,
+	}
+	if !analysis.UpdatedAt.IsZero() {
+		response.UpdatedAt = &analysis.UpdatedAt
+	}
+	return response
+}
+
+type inboxAnalysisStore interface {
+	Save(context.Context, storedInboxAnalysis) error
+	Load(context.Context, string) (storedInboxAnalysis, error)
+	SetRuleApplied(context.Context, string, string, bool) (storedInboxAnalysis, error)
+}
+
+type mongoInboxAnalysisStore struct {
+	collection *mongo.Collection
+}
+
+func (store mongoInboxAnalysisStore) Save(ctx context.Context, analysis storedInboxAnalysis) error {
+	_, err := store.collection.ReplaceOne(
+		ctx,
+		bson.M{"tenantId": analysis.TenantID},
+		analysis,
+		options.Replace().SetUpsert(true),
+	)
+	return err
+}
+
+func (store mongoInboxAnalysisStore) Load(ctx context.Context, tenantID string) (storedInboxAnalysis, error) {
+	var analysis storedInboxAnalysis
+	err := store.collection.FindOne(ctx, bson.M{"tenantId": tenantID}).Decode(&analysis)
+	return analysis, err
+}
+
+func (store mongoInboxAnalysisStore) SetRuleApplied(ctx context.Context, tenantID, ruleID string, applied bool) (storedInboxAnalysis, error) {
+	update := bson.M{"$pull": bson.M{"activeRuleIds": ruleID}}
+	if applied {
+		update = bson.M{"$addToSet": bson.M{"activeRuleIds": ruleID}}
+	}
+	var analysis storedInboxAnalysis
+	err := store.collection.FindOneAndUpdate(
+		ctx,
+		bson.M{"tenantId": tenantID, "suggestions.id": ruleID},
+		update,
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	).Decode(&analysis)
+	return analysis, err
+}
+
+func inboxAnalysisTenantID(r *http.Request) string {
+	tenantID, _ := r.Context().Value("userId").(string)
+	return strings.TrimSpace(tenantID)
+}
+
+func writeInboxAnalysis(w http.ResponseWriter, analysis inboxAnalysisResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(analysis)
+}
+
+func (s *Server) handleGetAIInboxRules(w http.ResponseWriter, r *http.Request) {
+	tenantID := inboxAnalysisTenantID(r)
+	if tenantID == "" {
+		http.Error(w, "Authenticated tenant required", http.StatusUnauthorized)
+		return
+	}
+
+	analysis, err := s.inboxAnalysisStore.Load(r.Context(), tenantID)
+	if err == mongo.ErrNoDocuments {
+		writeInboxAnalysis(w, inboxAnalysisResponse{
+			Suggestions:   []inboxRuleSuggestion{},
+			ActiveRuleIDs: []string{},
+		})
+		return
+	}
+	if err != nil {
+		http.Error(w, "Could not load saved inbox rules", http.StatusInternalServerError)
+		return
+	}
+	writeInboxAnalysis(w, analysis.response())
+}
+
+func (s *Server) handleSetAIInboxRuleApplied(w http.ResponseWriter, r *http.Request) {
+	tenantID := inboxAnalysisTenantID(r)
+	if tenantID == "" {
+		http.Error(w, "Authenticated tenant required", http.StatusUnauthorized)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var request struct {
+		RuleID  string `json:"ruleId"`
+		Applied *bool  `json:"applied"`
+	}
+	if err := decoder.Decode(&request); err != nil {
+		http.Error(w, "Invalid applied rule preference", http.StatusBadRequest)
+		return
+	}
+	request.RuleID = strings.TrimSpace(request.RuleID)
+	if request.RuleID == "" || request.Applied == nil {
+		http.Error(w, "ruleId and applied are required", http.StatusBadRequest)
+		return
+	}
+	analysis, err := s.inboxAnalysisStore.SetRuleApplied(
+		r.Context(),
+		tenantID,
+		request.RuleID,
+		*request.Applied,
+	)
+	if err == mongo.ErrNoDocuments {
+		http.Error(w, "Saved inbox rule not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "Could not save applied rule preference", http.StatusInternalServerError)
+		return
+	}
+	writeInboxAnalysis(w, analysis.response())
 }
 
 // handleAIInboxRules asks the configured Qwen chat model to identify recurring
 // notification patterns, then validates its output before returning executable
 // message-ID matches to the client. Notification content is untrusted data.
 func (s *Server) handleAIInboxRules(w http.ResponseWriter, r *http.Request) {
+	tenantID := inboxAnalysisTenantID(r)
+	if tenantID == "" {
+		http.Error(w, "Authenticated tenant required", http.StatusUnauthorized)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 512<<10)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
@@ -88,7 +237,8 @@ Requirements:
 - Prefer deterministic conditions based on sender, topic, message purpose, security activity, offers, or account changes.
 - A rule may label or prioritize messages. Do not propose automatic deletion.
 - matchingIds must contain only exact IDs from the input.
-- Conditions must be short human-readable predicates.
+- Conditions must be short human-readable predicates without leading conjunctions.
+- Each description must directly identify the kind of messages matched in one sentence. Describe the category itself, not a tip, benefit, recommendation, or instruction to the user.
 - Return JSON only, without Markdown or commentary, using exactly this shape:
 {"suggestions":[{"title":"...","description":"...","destination":"...","conditions":["..."],"matchingIds":["..."]}]}
 
@@ -111,8 +261,24 @@ Messages:
 	if model == "" {
 		model = groqAIModel
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(inboxAnalysisResponse{Model: model, Suggestions: suggestions})
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	analysis := inboxAnalysisResponse{
+		Model:         model,
+		Suggestions:   suggestions,
+		ActiveRuleIDs: []string{},
+		UpdatedAt:     &now,
+	}
+	if err := s.inboxAnalysisStore.Save(r.Context(), storedInboxAnalysis{
+		TenantID:      tenantID,
+		Model:         model,
+		Suggestions:   suggestions,
+		ActiveRuleIDs: []string{},
+		UpdatedAt:     now,
+	}); err != nil {
+		http.Error(w, "Could not save Qwen inbox analysis", http.StatusInternalServerError)
+		return
+	}
+	writeInboxAnalysis(w, analysis)
 }
 
 func parseInboxRuleSuggestions(answer string, knownIDs map[string]struct{}) ([]inboxRuleSuggestion, error) {
