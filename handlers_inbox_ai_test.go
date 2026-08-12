@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -116,7 +118,7 @@ func (store *fakeInboxAnalysisStore) SetRuleApplied(_ context.Context, tenantID,
 	return store.setAppliedResult, store.setAppliedErr
 }
 
-func TestHandleAIInboxRulesPersistsValidatedQwenSuggestions(t *testing.T) {
+func TestHandleAIInboxRulesAcceptsHundredMessagesAndPersistsSuggestions(t *testing.T) {
 	modelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"choices": []any{map[string]any{
@@ -140,14 +142,24 @@ func TestHandleAIInboxRulesPersistsValidatedQwenSuggestions(t *testing.T) {
 		selfHostedAIChatCompletionsModel = originalModel
 	})
 
+	messages := make([]inboxAnalysisMessage, 100)
+	for index := range messages {
+		messages[index] = inboxAnalysisMessage{
+			ID:      fmt.Sprintf("message-%d", index),
+			Sender:  "eBay",
+			Subject: "Offer",
+			Body:    "Save now",
+		}
+	}
+	messages[0].ID = "offer-1"
+	messages[1].ID = "offer-2"
+	requestBody, err := json.Marshal(map[string]any{"messages": messages})
+	if err != nil {
+		t.Fatal(err)
+	}
 	store := &fakeInboxAnalysisStore{}
 	server := &Server{inboxAnalysisStore: store}
-	request := httptest.NewRequest(http.MethodPost, "/api/ai/inbox-rules", strings.NewReader(`{
-		"messages":[
-			{"id":"offer-1","sender":"eBay","subject":"Offer one","body":"Save now"},
-			{"id":"offer-2","sender":"eBay","subject":"Offer two","body":"Save again"}
-		]
-	}`))
+	request := httptest.NewRequest(http.MethodPost, "/api/ai/inbox-rules", bytes.NewReader(requestBody))
 	request = request.WithContext(context.WithValue(request.Context(), "userId", "tenant-1"))
 	response := httptest.NewRecorder()
 

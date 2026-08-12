@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	maxInboxAnalysisMessages  = 50
-	maxInboxAnalysisBodyRunes = 12000
+	maxInboxAnalysisMessages  = 100
+	maxInboxAnalysisBodyRunes = 1000
 )
 
 type inboxAnalysisMessage struct {
