@@ -161,6 +161,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/transaction-summaries", s.handleGetTransactionSummaries)
 	s.mux.HandleFunc("GET /api/payouts/{user}", s.handleGetPayouts)
 	s.mux.HandleFunc("GET /api/listings/{user}", s.handleGetListings)
+	s.mux.HandleFunc("GET /api/listings/{user}/items/{itemId}", s.handleGetListingItem)
 	s.mux.HandleFunc("GET /api/account/{user}", s.handleGetAccount)
 	s.mux.HandleFunc("GET /api/tracking", s.handleTracking)
 

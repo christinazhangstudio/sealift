@@ -221,3 +221,50 @@ func (c *Client) GetSellerList(
 
 	return &sellerList, nil
 }
+
+type GetItemRequest struct {
+	XMLName              xml.Name `xml:"GetItemRequest"`
+	XMLNS                string   `xml:"xmlns,attr"`
+	RequesterCredentials struct {
+		EBayAuthToken string `xml:"eBayAuthToken"`
+	} `xml:"RequesterCredentials"`
+	ErrorLanguage string `xml:"ErrorLanguage"`
+	WarningLevel  string `xml:"WarningLevel"`
+	ItemID        string `xml:"ItemID"`
+	DetailLevel   string `xml:"DetailLevel"`
+}
+
+type GetItemResponse struct {
+	XMLName   xml.Name `xml:"GetItemResponse"`
+	Timestamp string   `xml:"Timestamp"`
+	Ack       string   `xml:"Ack"`
+	Item      Item     `xml:"Item"`
+}
+
+func (c *Client) GetItem(ctx context.Context, itemID string) (*Item, error) {
+	token, err := c.Auth.GetToken(ctx, ctx.Value(auth.USER).(string))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get or refresh user token; %w", err)
+	}
+
+	request := GetItemRequest{
+		XMLNS:          "urn:ebay:apis:eBLBaseComponents",
+		ErrorLanguage:  "en_US",
+		WarningLevel:   "High",
+		ItemID:         itemID,
+		DetailLevel:    "ReturnAll",
+	}
+	request.RequesterCredentials.EBayAuthToken = token
+
+	var resp GetItemResponse
+	if err := c.doXML(ctx, "GetItem", "967", request, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Ack != "Success" && resp.Ack != "Warning" {
+		return nil, fmt.Errorf("GetItem %s: ack %s", itemID, resp.Ack)
+	}
+	if resp.Item.ItemID == "" {
+		return nil, fmt.Errorf("GetItem %s: empty item", itemID)
+	}
+	return &resp.Item, nil
+}

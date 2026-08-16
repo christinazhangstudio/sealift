@@ -314,6 +314,37 @@ func (s *Server) handleGetListings(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleGetListingItem(w http.ResponseWriter, r *http.Request) {
+	user := r.PathValue("user")
+	itemID := r.PathValue("itemId")
+	if user == "" || itemID == "" {
+		http.Error(w, "user and itemId required.", http.StatusBadRequest)
+		return
+	}
+
+	userID, _ := r.Context().Value("userId").(string)
+	dynamicClient, _, err := s.getEbayClientForUser(r.Context(), userID)
+	if err != nil {
+		slog.Error("Failed to build dynamic client for GetItem", "err", err, "userID", userID)
+		http.Error(w, "Failed to resolve credentials", http.StatusUnauthorized)
+		return
+	}
+
+	userCtx := context.WithValue(r.Context(), auth.USER, user)
+	item, err := dynamicClient.GetItem(userCtx, itemID)
+	if err != nil {
+		if respondIfReauthRequired(w, err, user) {
+			return
+		}
+		slog.Error("failed to get item", "err", err, "user", user, "itemId", itemID)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(item)
+}
+
 func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 	defaultPageSize := 200 // maximum allowed by ebay, actual default is 25
 
