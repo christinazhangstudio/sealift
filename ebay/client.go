@@ -23,7 +23,11 @@ type Client struct {
 	// https://api.sandbox.ebay.com for sandbox
 	URL string
 
-	// TradURL specifies the legacy API endpoint that some APIs are on.
+	// SellURL specifies the endpoint for the newer REST Sell APIs.
+	// https://api.ebay.com for prod
+	// https://api.sandbox.ebay.com for sandbox
+	SellURL string
+
 	// https://api.ebay.com/ws/api.dll for prod
 	// https://api.sandbox.ebay.com/ws/api.dll for sandbox
 	TradURL string
@@ -128,14 +132,7 @@ func (c *Client) doJSON(
 // doXML handles the full lifecycle of a legacy XML Trading API request.
 // It marshals the XML, sets required Trading API headers, executes it, and unmarshals the response.
 // Caller is responsible for verifying the Ack status in the response struct.
-func (c *Client) doXML(
-	ctx context.Context,
-	callName string,
-	compatLevel string,
-	token string,
-	reqBody interface{},
-	respBody interface{},
-) error {
+func (c *Client) doXML(ctx context.Context, callName, compatLevel string, reqBody, respBody interface{}) error {
 	xmlData, err := xml.MarshalIndent(reqBody, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal request XML; %w", err)

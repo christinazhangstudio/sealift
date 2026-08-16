@@ -207,7 +207,7 @@ func (c *Client) GetSellerList(
 	request.Pagination.PageNumber = pageIdx
 
 	var sellerList SellerListResponse
-	if err := c.doXML(ctx, "GetSellerList", "967", token, request, &sellerList); err != nil {
+	if err := c.doXML(ctx, "GetSellerList", "967", request, &sellerList); err != nil {
 		return nil, err
 	}
 

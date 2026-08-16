@@ -6,3 +6,6 @@ prompts/
 run.ps1
 run.sh
 *omit.md
+.omp/
+TODO.md
+sealift

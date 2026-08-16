@@ -8,7 +8,10 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.tesla.com/chrzhang/sealift/api"
 	"github.tesla.com/chrzhang/sealift/auth"
@@ -148,25 +151,43 @@ func (s *Server) handleGetTransactionSummaries(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	var userSummaries []api.UserSummary
-	for _, user := range users {
-		userCtx := context.WithValue(r.Context(), auth.USER, user)
-		summary, err := dynamicClient.GetTransactionSummary(userCtx)
-		if err != nil {
-			if respondIfReauthRequired(w, err, user) {
-				return
-			}
-			slog.Error("failed to get transaction summary", "err", err, "user", user)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+	userSummaries := make([]api.UserSummary, len(users))
+	g, ctx := errgroup.WithContext(r.Context())
 
-		userSummaries = append(userSummaries, api.UserSummary{
-			User:    user,
-			Summary: summary,
+	var failedUser string
+	var mu sync.Mutex
+
+	for i, user := range users {
+		i, user := i, user
+		g.Go(func() error {
+			userCtx := context.WithValue(ctx, auth.USER, user)
+			summary, err := dynamicClient.GetTransactionSummary(userCtx)
+			if err != nil {
+				mu.Lock()
+				if failedUser == "" {
+					failedUser = user
+				}
+				mu.Unlock()
+				return err
+			}
+
+			userSummaries[i] = api.UserSummary{
+				User:    user,
+				Summary: summary,
+			}
+			return nil
 		})
 	}
+	err = g.Wait()
 
+	if err != nil {
+		if respondIfReauthRequired(w, err, failedUser) {
+			return
+		}
+		slog.Error("failed to get transaction summary", "err", err, "user", failedUser)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	json.NewEncoder(w).Encode(userSummaries)
 }
 

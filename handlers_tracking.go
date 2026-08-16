@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sync"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.tesla.com/chrzhang/sealift/auth"
 	"github.tesla.com/chrzhang/sealift/ebay"
@@ -38,23 +41,41 @@ func (s *Server) handleTracking(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var allOrders []TrackingUserOrders
-	for _, user := range users {
-		userCtx := context.WithValue(r.Context(), auth.USER, user)
-		resp, err := dynamicClient.GetOrders(userCtx)
-		if err != nil {
-			if respondIfReauthRequired(w, err, user) {
-				return
+	allOrders := make([]TrackingUserOrders, len(users))
+	g, ctx := errgroup.WithContext(r.Context())
+
+	var failedUser string
+	var mu sync.Mutex
+
+	for i, user := range users {
+		i, user := i, user
+		g.Go(func() error {
+			userCtx := context.WithValue(ctx, auth.USER, user)
+			resp, err := dynamicClient.GetOrders(userCtx)
+			if err != nil {
+				mu.Lock()
+				if failedUser == "" {
+					failedUser = user
+				}
+				mu.Unlock()
+				return err
 			}
-			slog.Error("failed to get orders", "err", err, "user", user)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+
+			allOrders[i] = TrackingUserOrders{
+				User:   user,
+				Orders: resp.Orders,
+			}
+			return nil
+		})
+	}
+	err = g.Wait()
+	if err != nil {
+		if respondIfReauthRequired(w, err, failedUser) {
 			return
 		}
-
-		allOrders = append(allOrders, TrackingUserOrders{
-			User:   user,
-			Orders: resp.Orders,
-		})
+		slog.Error("failed to get orders", "err", err, "user", failedUser)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")

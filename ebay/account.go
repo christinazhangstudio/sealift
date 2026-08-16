@@ -177,7 +177,7 @@ func (c *Client) GetAccount(
 	request.Pagination.PageNumber = pageIdx
 
 	var accountResp AccountResponse
-	if err := c.doXML(ctx, "GetAccount", "1207", token, request, &accountResp); err != nil {
+	if err := c.doXML(ctx, "GetAccount", "1207", request, &accountResp); err != nil {
 		return nil, err
 	}
 

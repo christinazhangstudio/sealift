@@ -56,13 +56,14 @@ func (s *Server) getEbayClientForUser(
 	u := ebay.ProdAPIURL
 	tu := ebay.ProdTradURL
 	nu := ebay.ProdNotificationURL
+	su := ebay.ProdSellAPIURL
 	au := ebay.ProdAuthURL
 	uu := ebay.ProdIdentityURL
-
 	if user.EbayDeveloperConfig.IsSandbox || strings.Contains(user.EbayDeveloperConfig.AppID, "SBX-") {
 		u = ebay.SandboxAPIURL
 		tu = ebay.SandboxTradURL
 		nu = ebay.SandboxNotificationURL
+		su = ebay.SandboxSellAPIURL
 		au = ebay.SandboxAuthURL
 		uu = ebay.SandboxIdentityURL
 	}
@@ -72,6 +73,7 @@ func (s *Server) getEbayClientForUser(
 		URL:             u,
 		TradURL:         tu,
 		NotificationURL: nu,
+		SellURL:         su,
 		Auth: &auth.Client{
 			Client:       s.httpClient,
 			DB:           s.ebayAccountsCol,
@@ -91,9 +93,9 @@ func (s *Server) getEbayClientForUser(
 func (s *Server) getAnyEbayClient(ctx context.Context) (*ebay.Client, error) {
 	// 1. Try global environment variables first (most robust for app-level webhooks)
 	if ebayAppID != "" && ebayCertID != "" {
-		u, tu, nu, au, uu := ebay.ProdAPIURL, ebay.ProdTradURL, ebay.ProdNotificationURL, ebay.ProdAuthURL, ebay.ProdIdentityURL
+		u, tu, nu, su, au, uu := ebay.ProdAPIURL, ebay.ProdTradURL, ebay.ProdNotificationURL, ebay.ProdSellAPIURL, ebay.ProdAuthURL, ebay.ProdIdentityURL
 		if strings.Contains(ebayAppID, "SBX-") {
-			u, tu, nu, au, uu = ebay.SandboxAPIURL, ebay.SandboxTradURL, ebay.SandboxNotificationURL, ebay.SandboxAuthURL, ebay.SandboxIdentityURL
+			u, tu, nu, su, au, uu = ebay.SandboxAPIURL, ebay.SandboxTradURL, ebay.SandboxNotificationURL, ebay.SandboxSellAPIURL, ebay.SandboxAuthURL, ebay.SandboxIdentityURL
 		}
 
 		return &ebay.Client{
@@ -101,6 +103,7 @@ func (s *Server) getAnyEbayClient(ctx context.Context) (*ebay.Client, error) {
 			URL:             u,
 			TradURL:         tu,
 			NotificationURL: nu,
+			SellURL:         su,
 			Auth: &auth.Client{
 				Client:       s.httpClient,
 				DB:           s.ebayAccountsCol,
