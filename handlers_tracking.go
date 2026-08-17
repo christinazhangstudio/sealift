@@ -3,14 +3,16 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
-
 	"golang.org/x/sync/errgroup"
 
 	"github.tesla.com/chrzhang/sealift/auth"
 	"github.tesla.com/chrzhang/sealift/ebay"
+	"github.tesla.com/chrzhang/sealift/usps"
 )
 
 type TrackingUserOrders struct {
@@ -80,4 +82,36 @@ func (s *Server) handleTracking(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(allOrders)
+}
+
+func (s *Server) handleUSPSTracking(w http.ResponseWriter, r *http.Request) {
+	if s.usps == nil {
+		http.Error(w, "USPS is not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	number := strings.TrimSpace(r.PathValue("trackingNumber"))
+	if number == "" {
+		http.Error(w, "trackingNumber required", http.StatusBadRequest)
+		return
+	}
+
+	track, err := s.usps.Track(r.Context(), usps.TrackRequest{
+		TrackingNumber:     number,
+		MailingDate:        usps.MailingDate(r.URL.Query().Get("mailingDate")),
+		DestinationZIPCode: usps.DestinationZIP(r.URL.Query().Get("destinationZIPCode")),
+	})
+	if err != nil {
+		slog.Warn("USPS tracking lookup failed", "trackingNumber", number, "err", err)
+		status := http.StatusServiceUnavailable
+		var apiErr *usps.APIError
+		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusNotFound || apiErr.StatusCode == http.StatusBadRequest) {
+			status = http.StatusNotFound
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(track)
 }

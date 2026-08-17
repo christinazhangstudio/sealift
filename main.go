@@ -14,6 +14,7 @@ import (
 	"github.com/rs/cors"
 	"github.tesla.com/chrzhang/sealift/inbox"
 	"github.tesla.com/chrzhang/sealift/secrets"
+	"github.tesla.com/chrzhang/sealift/usps"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -54,6 +55,9 @@ var (
 	ebayAppID         = os.Getenv("EBAY_APP_ID")
 	ebayDevID         = os.Getenv("EBAY_DEV_ID")
 	ebayCertID        = os.Getenv("EBAY_CERT_ID")
+	uspsClientID      = os.Getenv("USPS_CLIENT_ID")
+	uspsClientSecret  = os.Getenv("USPS_CLIENT_SECRET")
+	uspsUseTEM        = strings.EqualFold(os.Getenv("USPS_USE_TEM"), "true")
 )
 
 func main() {
@@ -110,6 +114,7 @@ func main() {
 		passwordResetsCol:     mongoDB.Collection("password_resets"),
 		notificationTestsCol:  mongoDB.Collection("notification_tests"),
 		inboxAnalysisStore:    mongoInboxAnalysisStore{collection: mongoDB.Collection("inbox_rule_suggestions")},
+		usps:                  newUSPSClient(sharedClient),
 	}
 
 	srv.registerRoutes()
@@ -227,4 +232,12 @@ func newDB(ctx context.Context, uri string) (*mongo.Client, error) {
 	slog.Debug("connected to mongodb", "uri", uri)
 
 	return db, err
+}
+
+func newUSPSClient(httpClient *http.Client) *usps.Client {
+	if strings.TrimSpace(uspsClientID) == "" || strings.TrimSpace(uspsClientSecret) == "" {
+		slog.Info("USPS credentials not configured; tracking enrichment disabled")
+		return nil
+	}
+	return usps.New(httpClient, uspsClientID, uspsClientSecret, uspsUseTEM)
 }

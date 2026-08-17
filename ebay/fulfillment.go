@@ -91,6 +91,7 @@ type ShippingFulfillment struct {
 	ShippingCarrierCode    string                `json:"shippingCarrierCode"`
 	ShippedDate            string                `json:"shippedDate"`
 	LineItems              []FulfillmentLineItem `json:"lineItems,omitempty"`
+	USPSTracking           any                   `json:"uspsTracking,omitempty"`
 }
 
 type shippingFulfillmentsResponse struct {

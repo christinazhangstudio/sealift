@@ -10,6 +10,7 @@ import (
 	"github.tesla.com/chrzhang/sealift/auth"
 	"github.tesla.com/chrzhang/sealift/ebay"
 	"github.tesla.com/chrzhang/sealift/inbox"
+	"github.tesla.com/chrzhang/sealift/usps"
 	"github.tesla.com/chrzhang/sealift/secrets"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -30,6 +31,7 @@ type Server struct {
 	passwordResetsCol     *mongo.Collection
 	notificationTestsCol  *mongo.Collection
 	inboxAnalysisStore    inboxAnalysisStore
+	usps                  *usps.Client
 }
 
 // getEbayClientForUser builds an eBay client
@@ -164,6 +166,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/listings/{user}/items/{itemId}", s.handleGetListingItem)
 	s.mux.HandleFunc("GET /api/account/{user}", s.handleGetAccount)
 	s.mux.HandleFunc("GET /api/tracking", s.handleTracking)
+	s.mux.HandleFunc("GET /api/tracking/{trackingNumber}", s.handleUSPSTracking)
 
 	// Notifications
 	s.mux.HandleFunc("GET /api/notification/topic/{topicId}", s.handleGetTopic)
