@@ -206,6 +206,8 @@ func (s *Server) handleSSEStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+const messageHistorySyncVersion = 1
+
 // syncEbayMessageHistory imports messages eBay still exposes into the same
 // collection and payload contract used by NEW_MESSAGE webhooks. The first run
 // is a full backfill; later runs overlap by a day to cover delayed updates.
@@ -221,6 +223,7 @@ func (s *Server) syncEbayMessageHistory(
 
 	var account struct {
 		MessageHistorySyncedAt time.Time `bson:"message_history_synced_at"`
+		MessageHistoryVersion  int       `bson:"message_history_sync_version"`
 	}
 	if err := s.ebayAccountsCol.FindOne(ctx, bson.M{
 		"user": ebayUser, "sealift_user_id": tenantID,
@@ -230,7 +233,8 @@ func (s *Server) syncEbayMessageHistory(
 
 	syncStartedAt := time.Now().UTC()
 	var start *time.Time
-	if !account.MessageHistorySyncedAt.IsZero() {
+	if account.MessageHistoryVersion == messageHistorySyncVersion &&
+		!account.MessageHistorySyncedAt.IsZero() {
 		overlapStart := account.MessageHistorySyncedAt.Add(-24 * time.Hour)
 		start = &overlapStart
 	}
@@ -254,7 +258,10 @@ func (s *Server) syncEbayMessageHistory(
 	}
 	if _, err := s.ebayAccountsCol.UpdateOne(ctx, bson.M{
 		"user": ebayUser, "sealift_user_id": tenantID,
-	}, bson.M{"$set": bson.M{"message_history_synced_at": syncStartedAt}}); err != nil {
+	}, bson.M{"$set": bson.M{
+		"message_history_synced_at":    syncStartedAt,
+		"message_history_sync_version": messageHistorySyncVersion,
+	}}); err != nil {
 		return nil, fmt.Errorf("save message sync state: %w", err)
 	}
 	return inserted, nil

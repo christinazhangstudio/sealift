@@ -1,9 +1,9 @@
 package main
 
 import (
-	"errors"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -239,6 +239,27 @@ func (s *Server) handleGetPayouts(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+const maxSellerListRange = 120 * 24 * time.Hour
+
+func parseSellerListRange(startFromRaw, startToRaw string) (time.Time, time.Time, error) {
+	startFrom, err := time.Parse(time.RFC3339Nano, startFromRaw)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid startFrom format; use RFC3339")
+	}
+
+	startTo, err := time.Parse(time.RFC3339Nano, startToRaw)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid startTo format; use RFC3339")
+	}
+	if startTo.Before(startFrom) {
+		return time.Time{}, time.Time{}, fmt.Errorf("startTo must not be before startFrom")
+	}
+	if startTo.Sub(startFrom) > maxSellerListRange {
+		return time.Time{}, time.Time{}, fmt.Errorf("range cannot exceed 120 days")
+	}
+	return startFrom, startTo, nil
+}
+
 func (s *Server) handleGetListings(w http.ResponseWriter, r *http.Request) {
 	defaultPageSize := 200 // maximum allowed by ebay, actual default is 25
 
@@ -254,27 +275,12 @@ func (s *Server) handleGetListings(w http.ResponseWriter, r *http.Request) {
 		pageIdx = 1
 	}
 
-	layout := "2006-01-02" // YYYY-MM-DD
-	startFrom, err := time.Parse(layout, r.URL.Query().Get("startFrom"))
+	startFrom, startTo, err := parseSellerListRange(
+		r.URL.Query().Get("startFrom"),
+		r.URL.Query().Get("startTo"),
+	)
 	if err != nil {
-		http.Error(w, "invalid startFrom format. Use YYYY-MM-DD.", http.StatusBadRequest)
-		return
-	}
-
-	startTo, err := time.Parse(layout, r.URL.Query().Get("startTo"))
-	if err != nil {
-		http.Error(w, "invalid startTo format. Use YYYY-MM-DD.", http.StatusBadRequest)
-		return
-	}
-
-	if startTo.Before(startFrom) {
-		http.Error(w, "startTo must be greater than startFrom.", http.StatusBadRequest)
-		return
-	}
-
-	daysDiff := startTo.Sub(startFrom).Hours() / 24
-	if daysDiff > 120 {
-		http.Error(w, "range cannot exceed 120 days.", http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 

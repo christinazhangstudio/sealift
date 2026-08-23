@@ -30,4 +30,4 @@ Signing in as a guest lets you look around without creating an account. Guests c
 
 ## Deleting your account
 
-The Admin page permanently deletes your Sealift account: your seller connections, stored tokens and notifications. It cannot be undone. Your eBay account and listings are unaffected — deleting from Sealift only removes Sealift's access.
+The Admin page permanently deletes your Sealift account: your seller connections, stored tokens, notifications, and inventory notes. It cannot be undone. Your eBay account and listings are unaffected — deleting from Sealift only removes Sealift's access.

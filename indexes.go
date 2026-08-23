@@ -125,6 +125,18 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) {
 			},
 			why: "load and replace the latest Qwen inbox rule suggestions for one tenant",
 		},
+		{
+			collection: "inventory_notes",
+			model: mongo.IndexModel{
+				Keys: bson.D{
+					{Key: "tenantId", Value: 1},
+					{Key: "seller", Value: 1},
+					{Key: "itemId", Value: 1},
+				},
+				Options: options.Index().SetUnique(true).SetName("tenant_seller_item_unique"),
+			},
+			why: "load and upsert one private note per tenant seller listing",
+		},
 
 		// TTL indexes: these expire documents, they don't serve lookups. Left
 		// unnamed so they match the default-named ones already in the database —

@@ -10,8 +10,8 @@ import (
 	"github.tesla.com/chrzhang/sealift/auth"
 	"github.tesla.com/chrzhang/sealift/ebay"
 	"github.tesla.com/chrzhang/sealift/inbox"
-	"github.tesla.com/chrzhang/sealift/usps"
 	"github.tesla.com/chrzhang/sealift/secrets"
+	"github.tesla.com/chrzhang/sealift/usps"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -31,6 +31,7 @@ type Server struct {
 	passwordResetsCol     *mongo.Collection
 	notificationTestsCol  *mongo.Collection
 	inboxAnalysisStore    inboxAnalysisStore
+	inventoryNotes        inventoryNoteStore
 	usps                  *usps.Client
 }
 
@@ -167,6 +168,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/account/{user}", s.handleGetAccount)
 	s.mux.HandleFunc("GET /api/tracking", s.handleTracking)
 	s.mux.HandleFunc("GET /api/tracking/{trackingNumber}", s.handleUSPSTracking)
+
+	// Private Sealift metadata attached to eBay listings
+	s.mux.HandleFunc("GET /api/inventory-notes/{user}", s.handleListInventoryNotes)
+	s.mux.HandleFunc("PUT /api/inventory-notes/{user}/{itemId}", s.handleUpsertInventoryNote)
+	s.mux.HandleFunc("DELETE /api/inventory-notes/{user}/{itemId}", s.handleDeleteInventoryNote)
 
 	// Notifications
 	s.mux.HandleFunc("GET /api/notification/topic/{topicId}", s.handleGetTopic)

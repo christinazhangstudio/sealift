@@ -18,6 +18,12 @@ The photo is only used to generate the description. Sealift does not create the 
 
 A visual grid of your listings, showing each item's photo, title and price. Useful for spotting listings with missing or poor images. It uses the same date range and filters as the Listings page.
 
+## Inventory
+
+Inventory shows listing photos grouped by seller, with controls for the listing date range, status, and card size. Use the note button on a listing card to add private condition details, storage locations, packing reminders, or other information. Notes are stored in Sealift rather than sent to eBay; the filled note button identifies listings that already have one.
+
+When no live inventory is available, the page displays a clearly labeled sample inventory for both sellers, including a few example notes. Changes to sample notes are for preview only and reset when the page reloads.
+
 ## Analytics → Listings
 
 A table of listings for each seller, with the date range, status filter (Active, Completed, Ended, or all), and page size at the top. Set a From and To date and click Apply to load a different period. Because eBay limits how much history one request can cover, Sealift automatically splits long ranges into shorter periods and merges the results.

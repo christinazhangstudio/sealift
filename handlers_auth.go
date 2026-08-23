@@ -145,7 +145,6 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	}
 	user.EbayDeveloperConfig.CertID = encryptedCert
 
-
 	user.CreatedAt = time.Now()
 	result, err := s.sealiftUsersCol.InsertOne(r.Context(), user)
 	if err != nil {
@@ -426,6 +425,14 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 
 	dbCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
+
+	// Inventory notes are tenant-scoped, so they can be removed without
+	// considering whether another tenant registered the same eBay seller.
+	if s.inventoryNotes != nil {
+		if err := s.inventoryNotes.DeleteTenant(dbCtx, userID); err != nil {
+			slog.Warn("Failed to delete inventory notes", "err", err, "tenantID", userID)
+		}
+	}
 
 	// 4. Delete all ebay_accounts for this tenant
 	ebayResult, err := s.ebayAccountsCol.DeleteMany(dbCtx, bson.M{"sealift_user_id": userID})

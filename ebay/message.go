@@ -11,8 +11,9 @@ import (
 )
 
 const (
-	messageAPI      = "/commerce/message/v1/"
-	messagePageSize = 10 // eBay's documented maximum for conversation searches.
+	messageAPI             = "/commerce/message/v1/"
+	messagePageSize        = 10 // eBay's documented maximum for conversation searches.
+	memberConversationType = "FROM_MEMBERS"
 )
 
 // MessageDetail is the common message representation returned by both
@@ -126,6 +127,7 @@ func (c *Client) getAllConversations(
 		query := url.Values{}
 		query.Set("limit", strconv.Itoa(messagePageSize))
 		query.Set("offset", strconv.Itoa(offset))
+		query.Set("conversation_type", memberConversationType)
 		if start != nil {
 			query.Set("start_time", start.UTC().Format(time.RFC3339Nano))
 			query.Set("end_time", end.UTC().Format(time.RFC3339Nano))

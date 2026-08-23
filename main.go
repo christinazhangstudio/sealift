@@ -68,7 +68,6 @@ func main() {
 		panic(fmt.Sprintf("invalid credential encryption configuration: %v", err))
 	}
 
-
 	// local DB setup
 	db, err := newDB(ctx, mongoURI)
 	if err != nil {
@@ -113,8 +112,12 @@ func main() {
 		oauthStatesCol:        mongoDB.Collection("oauth_states"),
 		passwordResetsCol:     mongoDB.Collection("password_resets"),
 		notificationTestsCol:  mongoDB.Collection("notification_tests"),
-		inboxAnalysisStore:    mongoInboxAnalysisStore{collection: mongoDB.Collection("inbox_rule_suggestions")},
-		usps:                  newUSPSClient(sharedClient),
+		inventoryNotes: &mongoInventoryNoteStore{
+			notes:        mongoDB.Collection("inventory_notes"),
+			ebayAccounts: mongoDB.Collection("ebay_accounts"),
+		},
+		inboxAnalysisStore: mongoInboxAnalysisStore{collection: mongoDB.Collection("inbox_rule_suggestions")},
+		usps:               newUSPSClient(sharedClient),
 	}
 
 	srv.registerRoutes()

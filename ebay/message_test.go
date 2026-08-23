@@ -21,6 +21,9 @@ func TestGetAllConversationsPaginatesAndAppliesWindow(t *testing.T) {
 			r.URL.Query().Get("end_time") != end.Format(time.RFC3339Nano) {
 			t.Errorf("missing history window: %s", r.URL.RawQuery)
 		}
+		if r.URL.Query().Get("conversation_type") != memberConversationType {
+			t.Errorf("missing member conversation type: %s", r.URL.RawQuery)
+		}
 		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 		conversations := make([]ConversationDetail, 0, messagePageSize)
 		if offset == 0 {
@@ -49,29 +52,34 @@ func TestGetAllConversationsPaginatesAndAppliesWindow(t *testing.T) {
 	}
 }
 
-func TestGetAllConversationMessagesUsesConversationType(t *testing.T) {
+func TestGetAllConversationMessagesReturnsBothParticipants(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != messageAPI+"conversation/conversation-1" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		if r.URL.Query().Get("conversation_type") != "FROM_MEMBERS" {
+		if r.URL.Query().Get("conversation_type") != memberConversationType {
 			t.Errorf("missing conversation type: %s", r.URL.RawQuery)
 		}
 		_ = json.NewEncoder(w).Encode(messagesPage{
-			Messages: []MessageDetail{{MessageID: "message-1"}},
-			Total:    1,
+			Messages: []MessageDetail{
+				{MessageID: "message-1", SenderUsername: "buyer-1", RecipientUsername: "seller-1"},
+				{MessageID: "message-2", SenderUsername: "seller-1", RecipientUsername: "buyer-1"},
+			},
+			Total: 2,
 		})
 	}))
 	defer server.Close()
 
 	client := &Client{Client: server.Client(), NotificationURL: server.URL}
 	got, err := client.getAllConversationMessages(
-		context.Background(), "token", "conversation-1", "FROM_MEMBERS",
+		context.Background(), "token", "conversation-1", memberConversationType,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].MessageID != "message-1" {
-		t.Fatalf("unexpected messages: %#v", got)
+	if len(got) != 2 ||
+		got[0].SenderUsername != "buyer-1" ||
+		got[1].SenderUsername != "seller-1" {
+		t.Fatalf("conversation did not preserve both participants: %#v", got)
 	}
 }

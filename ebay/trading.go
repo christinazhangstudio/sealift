@@ -201,8 +201,8 @@ func (c *Client) GetSellerList(
 		GranularityLevel: "Coarse",
 	}
 	request.RequesterCredentials.EBayAuthToken = token
-	request.StartTimeFrom = startFrom.Format(time.RFC3339)
-	request.StartTimeTo = startTo.Format(time.RFC3339)
+	request.StartTimeFrom = startFrom.Format(time.RFC3339Nano)
+	request.StartTimeTo = startTo.Format(time.RFC3339Nano)
 	request.Pagination.EntriesPerPage = pageSize
 	request.Pagination.PageNumber = pageIdx
 
@@ -248,11 +248,11 @@ func (c *Client) GetItem(ctx context.Context, itemID string) (*Item, error) {
 	}
 
 	request := GetItemRequest{
-		XMLNS:          "urn:ebay:apis:eBLBaseComponents",
-		ErrorLanguage:  "en_US",
-		WarningLevel:   "High",
-		ItemID:         itemID,
-		DetailLevel:    "ReturnAll",
+		XMLNS:         "urn:ebay:apis:eBLBaseComponents",
+		ErrorLanguage: "en_US",
+		WarningLevel:  "High",
+		ItemID:        itemID,
+		DetailLevel:   "ReturnAll",
 	}
 	request.RequesterCredentials.EBayAuthToken = token
 
