@@ -181,14 +181,8 @@ func (c *Client) GetAccount(
 		return nil, err
 	}
 
-	for _, err := range accountResp.Errors {
-		if err.LongMessage != "" {
-			return nil, fmt.Errorf("API failed with error; %s", err.LongMessage)
-		}
-	}
-
-	if accountResp.Ack != "Success" {
-		return nil, fmt.Errorf("API failed with status %s", accountResp.Ack)
+	if err := checkTradingResponse("GetAccount", accountResp.Ack, accountResp.Errors); err != nil {
+		return nil, err
 	}
 
 	return &accountResp, nil

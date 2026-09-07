@@ -163,6 +163,10 @@ func (c *Client) doXML(ctx context.Context, callName, compatLevel string, reqBod
 		return fmt.Errorf("failed to read response body; %w", err)
 	}
 
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return &APIError{StatusCode: resp.StatusCode, Body: body}
+	}
+
 	if err := xml.Unmarshal(body, respBody); err != nil {
 		return fmt.Errorf("failed to unmarshal response XML (status %d): %w; body: %s", resp.StatusCode, err, string(body))
 	}
