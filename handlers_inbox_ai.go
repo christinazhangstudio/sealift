@@ -245,7 +245,7 @@ Requirements:
 Messages:
 ` + string(messageJSON)
 
-	answer, _, err := getPromptCompletion(prompt, false, 1200)
+	answer, _, err := getPromptCompletion(r.Context(), prompt, false, 1200)
 	if err != nil {
 		http.Error(w, "Qwen inbox analysis is unavailable", http.StatusBadGateway)
 		return

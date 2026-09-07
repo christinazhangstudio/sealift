@@ -150,8 +150,11 @@ func (s *Server) ingestDocs(ctx context.Context) (int, error) {
 
 		for _, text := range chunkMarkdown(string(content)) {
 
-			embedding, err := getEmbedding(text)
+			embedding, err := getEmbedding(ctx, text)
 			if err != nil {
+				if ctx.Err() != nil {
+					return ingestedCount, ctx.Err()
+				}
 				slog.Warn("Failed to get embedding", "err", err)
 				continue
 			}
@@ -207,7 +210,7 @@ func (s *Server) handleAIAsk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 1. Get embedding for the user question
-	queryEmbedding, err := getEmbedding(query)
+	queryEmbedding, err := getEmbedding(r.Context(), query)
 	if err != nil {
 		slog.Error("Failed to embed query", "err", err)
 		http.Error(w, "AI service unavailable", http.StatusInternalServerError)
@@ -350,7 +353,10 @@ func (s *Server) handleAIAsk(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, ": connected\n\n")
 		flusher.Flush()
 
-		if err := streamCompletion(w, flusher, query, llmContext, isCasualChat, chunks); err != nil {
+		if err := streamCompletion(r.Context(), w, flusher, query, llmContext, isCasualChat, chunks); err != nil {
+			if r.Context().Err() != nil {
+				return
+			}
 			slog.Error("streamCompletion failed", "err", err)
 			// Best effort: send an error event
 			fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]string{"error": "AI streaming failed"}))
@@ -359,7 +365,7 @@ func (s *Server) handleAIAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	answer, thinking, err := getCompletion(query, llmContext, isCasualChat)
+	answer, thinking, err := getCompletion(r.Context(), query, llmContext, isCasualChat)
 	if err != nil {
 		slog.Error("failed to generate answer", "err", err)
 		http.Error(w, "Failed to generate answer; AI server temporarily down?", http.StatusInternalServerError)
@@ -376,17 +382,17 @@ func (s *Server) handleAIAsk(w http.ResponseWriter, r *http.Request) {
 
 // --- AI Helper Functions ---
 
-func getEmbedding(text string) ([]float32, error) {
+func getEmbedding(ctx context.Context, text string) ([]float32, error) {
 	if selfHostedEmbeddingURL == "" {
 		return nil, errors.New("SELF_HOSTED_EMBEDDING_URL is required (set SELF_HOSTED_EMBEDDING_URL and SELF_HOSTED_EMBEDDING_MODEL to use your self-hosted embeddings endpoint)")
 	}
-	return getOpenAICompatibleEmbedding(text)
+	return getOpenAICompatibleEmbedding(ctx, text)
 }
 
 // getOpenAICompatibleEmbedding calls an OpenAI-compatible embeddings endpoint.
 // Set SELF_HOSTED_EMBEDDING_URL to the full target URL you want to POST to
 // (e.g. http://192.168.1.157:8080/v1/embeddings or a custom path your server exposes).
-func getOpenAICompatibleEmbedding(text string) ([]float32, error) {
+func getOpenAICompatibleEmbedding(ctx context.Context, text string) ([]float32, error) {
 	if selfHostedEmbeddingModel == "" {
 		return nil, errors.New("SELF_HOSTED_EMBEDDING_MODEL must be set when using SELF_HOSTED_EMBEDDING_URL")
 	}
@@ -402,7 +408,12 @@ func getOpenAICompatibleEmbedding(text string) ([]float32, error) {
 	body, _ := json.Marshal(payload)
 
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Post(url, "application/json", strings.NewReader(string(body)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, fmt.Errorf("create embedding request; %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -431,20 +442,20 @@ func getOpenAICompatibleEmbedding(text string) ([]float32, error) {
 
 // getCompletion returns the model's answer plus any reasoning/thinking text
 // (from reasoning_content, or extracted from inline <think> tags).
-func getCompletion(query string, contextText string, isCasual bool) (string, string, error) {
+func getCompletion(ctx context.Context, query string, contextText string, isCasual bool) (string, string, error) {
 	var prompt string
 	if isCasual {
 		prompt = loadPromptTemplate("prompts/casual.txt", map[string]string{"Query": query, "Context": contextText})
 	} else {
 		prompt = loadPromptTemplate("prompts/rag.txt", map[string]string{"Query": query, "Context": contextText})
 	}
-	return getPromptCompletion(prompt, true, 0)
+	return getPromptCompletion(ctx, prompt, true, 0)
 }
 
 // getPromptCompletion sends a fully formed prompt to the configured provider.
 // Structured tasks disable Qwen thinking and cap output so they complete within
 // a normal request instead of spending tokens on reasoning the client discards.
-func getPromptCompletion(prompt string, enableThinking bool, maxTokens int) (string, string, error) {
+func getPromptCompletion(ctx context.Context, prompt string, enableThinking bool, maxTokens int) (string, string, error) {
 
 	cloudKey := openAIAPIKey
 	useSelfHosted := useSelfHostedAI == "true"
@@ -496,7 +507,10 @@ func getPromptCompletion(prompt string, enableThinking bool, maxTokens int) (str
 		body, _ := json.Marshal(payload)
 
 		client := &http.Client{Timeout: 10 * time.Minute} // Long timeout for heavy self-hosted responses / code completion style generations
-		req, _ := http.NewRequest("POST", baseURL, strings.NewReader(string(body)))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL, strings.NewReader(string(body)))
+		if err != nil {
+			return "", "", fmt.Errorf("create AI request; %w", err)
+		}
 		if cloudKey != "" {
 			req.Header.Set("Authorization", "Bearer "+cloudKey)
 		}
@@ -625,6 +639,7 @@ func partialTagSuffix(s, tag string) int {
 // (Groq, self-hosted vLLM/Ollama OpenAI compat, etc.) using SSE and forwards
 // simplified events to the client: {"token": "foo"} and a final {"done":true,"sources":[...]}
 func streamCompletion(
+	ctx context.Context,
 	w http.ResponseWriter,
 	flusher http.Flusher,
 	query string,
@@ -686,7 +701,10 @@ func streamCompletion(
 	body, _ := json.Marshal(payload)
 
 	client := &http.Client{Timeout: 10 * time.Minute} // allow long-running model generations
-	req, _ := http.NewRequest("POST", baseURL, strings.NewReader(string(body)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL, strings.NewReader(string(body)))
+	if err != nil {
+		return fmt.Errorf("create streaming AI request; %w", err)
+	}
 	if cloudKey != "" {
 		req.Header.Set("Authorization", "Bearer "+cloudKey)
 	}
@@ -713,6 +731,16 @@ func streamCompletion(
 	// Splits inline <think>...</think> out of content deltas for server configs
 	// that don't extract reasoning into reasoning_content themselves.
 	var contentFilter thinkTagFilter
+	writeEvent := func(event any) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", mustJSON(event)); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -721,7 +749,10 @@ func streamCompletion(
 		}
 		dataStr := strings.TrimPrefix(line, "data: ")
 		trimmed := strings.TrimSpace(dataStr)
-		if trimmed == "" || trimmed == "[DONE]" {
+		if trimmed == "[DONE]" {
+			break
+		}
+		if trimmed == "" {
 			continue
 		}
 
@@ -743,46 +774,53 @@ func streamCompletion(
 
 			// Support common extensions for "thinking" / reasoning tokens from models like DeepSeek-R1, Qwen, etc.
 			if delta.ReasoningContent != "" {
-				fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]string{"thinking": delta.ReasoningContent}))
-				flusher.Flush()
+				if err := writeEvent(map[string]string{"thinking": delta.ReasoningContent}); err != nil {
+					return err
+				}
 			}
 			if delta.Thinking != "" {
-				fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]string{"thinking": delta.Thinking}))
-				flusher.Flush()
+				if err := writeEvent(map[string]string{"thinking": delta.Thinking}); err != nil {
+					return err
+				}
 			}
 			if delta.Content != "" {
 				thinkPart, contentPart := contentFilter.feed(delta.Content)
 				if thinkPart != "" {
-					fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]string{"thinking": thinkPart}))
-					flusher.Flush()
+					if err := writeEvent(map[string]string{"thinking": thinkPart}); err != nil {
+						return err
+					}
 				}
 				if contentPart != "" {
-					fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]string{"token": contentPart}))
-					flusher.Flush()
+					if err := writeEvent(map[string]string{"token": contentPart}); err != nil {
+						return err
+					}
 				}
 			}
 		}
+	}
+
+	// A canceled or broken upstream stream is incomplete. Do not send the
+	// success event first: clients close the stream as soon as they see done.
+	if err := scanner.Err(); err != nil {
+		return err
 	}
 
 	// Drain anything the think-tag filter was still holding back
 	if thinkPart, contentPart := contentFilter.flush(); thinkPart != "" || contentPart != "" {
 		if thinkPart != "" {
-			fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]string{"thinking": thinkPart}))
+			if err := writeEvent(map[string]string{"thinking": thinkPart}); err != nil {
+				return err
+			}
 		}
 		if contentPart != "" {
-			fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]string{"token": contentPart}))
+			if err := writeEvent(map[string]string{"token": contentPart}); err != nil {
+				return err
+			}
 		}
-		flusher.Flush()
 	}
 
 	// Final event with sources so the client can attach citations
-	fmt.Fprintf(w, "data: %s\n\n", mustJSON(map[string]any{"done": true, "sources": sources}))
-	flusher.Flush()
-
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-	return nil
+	return writeEvent(map[string]any{"done": true, "sources": sources})
 }
 
 func cosineSimilarity(a, b []float32) float32 {
