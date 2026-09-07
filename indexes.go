@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -154,7 +155,7 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) {
 			collection: "oauth_states",
 			model: mongo.IndexModel{
 				Keys:    bson.D{{Key: "createdAt", Value: 1}},
-				Options: options.Index().SetExpireAfterSeconds(15 * 60),
+				Options: options.Index().SetExpireAfterSeconds(int32(oauthStateTTL / time.Second)),
 			},
 			why: "abandoned OAuth attempts shouldn't accumulate",
 		},
