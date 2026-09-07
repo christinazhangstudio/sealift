@@ -70,6 +70,9 @@ func (c *jwksKeyCache) parseToken(ctx context.Context, sourceURL, raw string) (*
 func (c *jwksKeyCache) publicKey(ctx context.Context, sourceURL, kid string, refresh bool) (*rsa.PublicKey, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	if c.sourceURL != sourceURL {
 		c.sourceURL = sourceURL
@@ -85,13 +88,19 @@ func (c *jwksKeyCache) publicKey(ctx context.Context, sourceURL, kid string, ref
 		// all refresh attempts, including failures, rather than fetching for
 		// every rejected request.
 		c.refreshAfter = now.Add(jwksRefreshInterval)
-		keys, err := fetchSigningKeys(ctx, sourceURL)
+		// This fetch serves every waiting request. One disconnected browser
+		// must not cancel it and put healthy callers into the retry cooldown.
+		// The dedicated HTTP client's timeout still bounds the shared fetch.
+		keys, err := fetchSigningKeys(context.WithoutCancel(ctx), sourceURL)
 		if err != nil {
 			return nil, err
 		}
 		c.keys = keys
 		c.expiresAt = time.Now().Add(jwksCacheTTL)
 		expired = false
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if expired {
 		return nil, errors.New("session signing keys have expired")

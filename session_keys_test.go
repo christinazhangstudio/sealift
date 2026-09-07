@@ -303,3 +303,43 @@ func TestFetchSigningKeysHonorsRequestCancellation(t *testing.T) {
 		t.Fatal("JWKS fetch ignored request cancellation")
 	}
 }
+
+func TestSessionSigningKeysCanceledCallerDoesNotBlockHealthyRequests(t *testing.T) {
+	key := testSigningKey(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+		}
+		json.NewEncoder(w).Encode(JWKS{Keys: []JWK{testJWK(key, "key")}})
+	}))
+	defer server.Close()
+	var cache jwksKeyCache
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := make(chan error, 1)
+	go func() {
+		_, err := cache.publicKey(ctx, server.URL, "key", false)
+		first <- err
+	}()
+	<-started
+	cancel()
+	healthy := make(chan error, 1)
+	go func() {
+		_, err := cache.publicKey(context.Background(), server.URL, "key", false)
+		healthy <- err
+	}()
+	close(release)
+	if err := <-first; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled caller error = %v, want context.Canceled", err)
+	}
+	if err := <-healthy; err != nil {
+		t.Fatalf("healthy request failed after another caller canceled: %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("JWKS requests = %d, want one shared fetch", calls.Load())
+	}
+}
