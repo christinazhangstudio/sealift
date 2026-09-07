@@ -2,6 +2,7 @@ package ebay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -150,6 +151,12 @@ func (c *Client) GetOrders(
 			// Reuse it for this request's enrichment instead of loading and
 			// decrypting the same credentials once per shipped order.
 			fulfillments, err := c.getShippingFulfillments(gCtx, token, all[i].OrderID)
+			var apiErr *APIError
+			if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusUnauthorized {
+				// A long order crawl can outlive the original token. Resolve it
+				// again so normal expiry refresh still works, and retry once.
+				fulfillments, err = c.GetShippingFulfillments(gCtx, all[i].OrderID)
+			}
 			if err != nil {
 				slog.Warn("failed to get shipping fulfillments", "orderId", all[i].OrderID, "err", err)
 				return nil
