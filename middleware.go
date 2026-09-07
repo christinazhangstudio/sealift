@@ -2,12 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rsa"
-	"encoding/base64"
-	"encoding/json"
-	"fmt"
 	"log/slog"
-	"math/big"
 	"net/http"
 	"strings"
 
@@ -17,18 +12,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
-type JWKS struct {
-	Keys []struct {
-		Alg string `json:"alg"`
-		Kty string `json:"kty"`
-		Kid string `json:"kid"`
-		Use string `json:"use"`
-		N   string `json:"n"`
-		E   string `json:"e"`
-	} `json:"keys"`
-}
-
-var cachedPubKey *rsa.PublicKey
+var sessionSigningKeys jwksKeyCache
 
 // authMiddleware returns an http.Handler that validates JWT session cookies
 // on protected routes before forwarding to the ServeMux.
@@ -101,12 +85,8 @@ func (s *Server) authMiddleware() http.Handler {
 		}
 
 		// validate the JWT signature using asymmetric RS256 keys
-		token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
-			if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
-			}
-			return getPublicKey()
-		})
+		token, err := sessionSigningKeys.parseToken(r.Context(),
+			strings.TrimRight(frontendURL, "/")+"/api/jwks", tokenString)
 
 		if err != nil || !token.Valid {
 			slog.Error("unauthorized; invalid JWT signature", "err", err, "path", r.URL.Path)
@@ -155,47 +135,4 @@ func (s *Server) authMiddleware() http.Handler {
 
 		s.mux.ServeHTTP(w, r)
 	})
-}
-
-func getPublicKey() (*rsa.PublicKey, error) {
-	if cachedPubKey != nil {
-		return cachedPubKey, nil
-	}
-
-	// get JWKS from the Next.js frontend
-	url := fmt.Sprintf("%s/api/jwks", frontendURL)
-
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get JWKS: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var jwks JWKS
-	if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
-		return nil, fmt.Errorf("failed to parse JWKS json: %w", err)
-	}
-	if len(jwks.Keys) == 0 {
-		return nil, fmt.Errorf("no keys found in JWKS")
-	}
-
-	nBytes, err := base64.RawURLEncoding.DecodeString(jwks.Keys[0].N)
-	if err != nil {
-		return nil, err
-	}
-	eBytes, err := base64.RawURLEncoding.DecodeString(jwks.Keys[0].E)
-	if err != nil {
-		return nil, err
-	}
-
-	var eInt int
-	for _, b := range eBytes {
-		eInt = eInt<<8 + int(b)
-	}
-
-	cachedPubKey = &rsa.PublicKey{
-		N: new(big.Int).SetBytes(nBytes),
-		E: eInt,
-	}
-	return cachedPubKey, nil
 }
