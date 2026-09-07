@@ -15,7 +15,6 @@ import (
 
 	"github.tesla.com/chrzhang/sealift/api"
 	"github.tesla.com/chrzhang/sealift/auth"
-	"github.tesla.com/chrzhang/sealift/ebay"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -302,10 +301,7 @@ func (s *Server) handleGetListings(w http.ResponseWriter, r *http.Request) {
 
 	userCtx := context.WithValue(r.Context(), auth.USER, user)
 	listings, err := dynamicClient.GetSellerList(userCtx, pageSize, pageIdx, startFrom, startTo)
-	// if the error was that no items were found for the seller
-	// for the specified range/page index, that's fine
-	// use an empty Listings array for the response.
-	if err != nil && err != ebay.ErrHasNoMoreItems {
+	if err != nil {
 		if respondIfReauthRequired(w, err, user) {
 			return
 		}

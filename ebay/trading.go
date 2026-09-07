@@ -3,15 +3,12 @@ package ebay
 import (
 	"context"
 	"encoding/xml"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.tesla.com/chrzhang/sealift/auth"
 )
-
-var ErrHasNoMoreItems = errors.New("seller has no more items to display")
 
 // The Inventory API is not used since only items created through the Inventory API are supported through it.
 // The traditional "Trading API" has to be used, which uses XML.
@@ -35,11 +32,12 @@ type SellerListRequest struct {
 }
 
 type SellerListResponse struct {
-	XMLName          xml.Name `xml:"GetSellerListResponse"`
-	Timestamp        string   `xml:"Timestamp"`
-	Ack              string   `xml:"Ack"`
-	Version          string   `xml:"Version"`
-	Build            string   `xml:"Build"`
+	XMLName          xml.Name    `xml:"GetSellerListResponse"`
+	Timestamp        string      `xml:"Timestamp"`
+	Ack              string      `xml:"Ack"`
+	Errors           []ErrorType `xml:"Errors" json:"Errors,omitempty"`
+	Version          string      `xml:"Version"`
+	Build            string      `xml:"Build"`
 	PaginationResult struct {
 		TotalNumberOfPages   int `xml:"TotalNumberOfPages"`
 		TotalNumberOfEntries int `xml:"TotalNumberOfEntries"`
@@ -211,8 +209,8 @@ func (c *Client) GetSellerList(
 		return nil, err
 	}
 
-	if sellerList.Ack != "Success" {
-		return nil, ErrHasNoMoreItems
+	if err := checkTradingResponse("GetSellerList", sellerList.Ack, sellerList.Errors); err != nil {
+		return nil, err
 	}
 
 	if sellerList.HasMoreItems {
@@ -235,10 +233,11 @@ type GetItemRequest struct {
 }
 
 type GetItemResponse struct {
-	XMLName   xml.Name `xml:"GetItemResponse"`
-	Timestamp string   `xml:"Timestamp"`
-	Ack       string   `xml:"Ack"`
-	Item      Item     `xml:"Item"`
+	XMLName   xml.Name    `xml:"GetItemResponse"`
+	Timestamp string      `xml:"Timestamp"`
+	Ack       string      `xml:"Ack"`
+	Errors    []ErrorType `xml:"Errors" json:"Errors,omitempty"`
+	Item      Item        `xml:"Item"`
 }
 
 func (c *Client) GetItem(ctx context.Context, itemID string) (*Item, error) {
@@ -260,8 +259,8 @@ func (c *Client) GetItem(ctx context.Context, itemID string) (*Item, error) {
 	if err := c.doXML(ctx, "GetItem", "967", request, &resp); err != nil {
 		return nil, err
 	}
-	if resp.Ack != "Success" && resp.Ack != "Warning" {
-		return nil, fmt.Errorf("GetItem %s: ack %s", itemID, resp.Ack)
+	if err := checkTradingResponse("GetItem", resp.Ack, resp.Errors); err != nil {
+		return nil, err
 	}
 	if resp.Item.ItemID == "" {
 		return nil, fmt.Errorf("GetItem %s: empty item", itemID)
