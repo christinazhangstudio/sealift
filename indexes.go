@@ -29,8 +29,6 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) {
 		why string
 	}
 
-	day := int32(24 * 60 * 60)
-
 	specs := []indexSpec{
 		{
 			collection: "ebay_accounts",
@@ -142,14 +140,6 @@ func ensureIndexes(ctx context.Context, db *mongo.Database) {
 		// unnamed so they match the default-named ones already in the database —
 		// asking for a different name on the same keys is a conflict, not a
 		// change.
-		{
-			collection: "revoked_tokens",
-			model: mongo.IndexModel{
-				Keys:    bson.D{{Key: "createdAt", Value: 1}},
-				Options: options.Index().SetExpireAfterSeconds(day),
-			},
-			why: "revoked tokens are irrelevant once the JWT itself expires",
-		},
 		{
 			collection: "oauth_states",
 			model: mongo.IndexModel{

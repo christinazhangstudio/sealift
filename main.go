@@ -91,6 +91,11 @@ func main() {
 
 	mongoDB := db.Database("sealift")
 
+	// This security migration must succeed before serving remembered sessions.
+	// Other index failures remain non-fatal performance/uniqueness warnings.
+	if err := ensureRevocationRetention(ctx, mongoDB); err != nil {
+		panic(fmt.Errorf("cannot ensure session revocation retention; %w", err))
+	}
 	ensureIndexes(ctx, mongoDB)
 
 	sharedClient := &http.Client{Timeout: time.Second * 30}

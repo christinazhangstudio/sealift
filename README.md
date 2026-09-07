@@ -31,6 +31,17 @@ docker push czhang19/christina:sealift
 
 ### mongodb
 
+Session revocations are retained for at least 30 days to cover the frontend's
+maximum signed JWT lifetime when Remember Device is selected. Deploy this
+backend retention migration before enabling 30-day sessions in the frontend.
+Startup creates the `revoked_tokens.createdAt` TTL index if missing, or extends
+an existing shorter TTL with MongoDB's
+[`collMod` command](https://www.mongodb.com/docs/manual/core/index-ttl/#change-the-expireafterseconds-value-for-a-ttl-index).
+Longer retention and indexes without automatic expiration are preserved. The
+backend refuses to start if it cannot confirm or update retention; its MongoDB
+credentials need permission to list indexes and, when needed, create an index or
+run `collMod`. No collection data or indexes are dropped during this migration.
+
 ```
 net start MongoDB
 net stop MongoDB
