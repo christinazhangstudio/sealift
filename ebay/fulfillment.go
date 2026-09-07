@@ -12,17 +12,16 @@ import (
 	"github.tesla.com/chrzhang/sealift/auth"
 )
 
-
 const (
 	fulfillmentAPI = "/sell/fulfillment/v1/"
 )
 
 type Address struct {
-	FullName       string `json:"fullName,omitempty"`
-	City           string `json:"city,omitempty"`
+	FullName        string `json:"fullName,omitempty"`
+	City            string `json:"city,omitempty"`
 	StateOrProvince string `json:"stateOrProvince,omitempty"`
-	PostalCode     string `json:"postalCode,omitempty"`
-	CountryCode    string `json:"countryCode,omitempty"`
+	PostalCode      string `json:"postalCode,omitempty"`
+	CountryCode     string `json:"countryCode,omitempty"`
 }
 
 type ShippingStep struct {
@@ -48,8 +47,8 @@ type PricingSummary struct {
 }
 
 type CancelStatus struct {
-	CancelState        string `json:"cancelState,omitempty"`
-	CancelledDate      string `json:"cancelledDate,omitempty"`
+	CancelState   string `json:"cancelState,omitempty"`
+	CancelledDate string `json:"cancelledDate,omitempty"`
 }
 
 type Order struct {
@@ -70,14 +69,14 @@ type Order struct {
 }
 
 type LineItem struct {
-	LineItemID                 string `json:"lineItemId"`
-	LegacyItemID               string `json:"legacyItemId"`
-	Title                      string `json:"title"`
-	Sku                        string `json:"sku"`
-	Quantity                   int    `json:"quantity"`
-	LineItemFulfillmentStatus  string `json:"lineItemFulfillmentStatus,omitempty"`
-	Total                      Amount `json:"total"`
-	LineItemCost               Amount `json:"lineItemCost"`
+	LineItemID                string `json:"lineItemId"`
+	LegacyItemID              string `json:"legacyItemId"`
+	Title                     string `json:"title"`
+	Sku                       string `json:"sku"`
+	Quantity                  int    `json:"quantity"`
+	LineItemFulfillmentStatus string `json:"lineItemFulfillmentStatus,omitempty"`
+	Total                     Amount `json:"total"`
+	LineItemCost              Amount `json:"lineItemCost"`
 }
 
 type FulfillmentLineItem struct {
@@ -97,8 +96,6 @@ type ShippingFulfillment struct {
 type shippingFulfillmentsResponse struct {
 	Fulfillments []ShippingFulfillment `json:"fulfillments"`
 }
-
-
 
 type GetOrdersResponse struct {
 	Href   string  `json:"href"`
@@ -149,7 +146,10 @@ func (c *Client) GetOrders(
 			continue
 		}
 		g.Go(func() error {
-			fulfillments, err := c.GetShippingFulfillments(gCtx, all[i].OrderID)
+			// The seller token was already resolved for the order pages above.
+			// Reuse it for this request's enrichment instead of loading and
+			// decrypting the same credentials once per shipped order.
+			fulfillments, err := c.getShippingFulfillments(gCtx, token, all[i].OrderID)
 			if err != nil {
 				slog.Warn("failed to get shipping fulfillments", "orderId", all[i].OrderID, "err", err)
 				return nil
@@ -171,7 +171,10 @@ func (c *Client) GetShippingFulfillments(ctx context.Context, orderID string) ([
 	if err != nil {
 		return nil, fmt.Errorf("failed to get or refresh user token; %w", err)
 	}
+	return c.getShippingFulfillments(ctx, token, orderID)
+}
 
+func (c *Client) getShippingFulfillments(ctx context.Context, token, orderID string) ([]ShippingFulfillment, error) {
 	endpoint := fmt.Sprintf("%s%sorder/%s/shipping_fulfillment", c.SellURL, fulfillmentAPI, url.PathEscape(orderID))
 	var resp shippingFulfillmentsResponse
 	if err := c.doJSON(ctx, http.MethodGet, endpoint, token, nil, &resp); err != nil {
@@ -179,4 +182,3 @@ func (c *Client) GetShippingFulfillments(ctx context.Context, orderID string) ([
 	}
 	return resp.Fulfillments, nil
 }
-
