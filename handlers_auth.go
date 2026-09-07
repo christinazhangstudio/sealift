@@ -29,6 +29,8 @@ import (
 // email lookups resolve regardless of how the address was typed or stored.
 var caseInsensitive = &options.Collation{Locale: "en", Strength: 2}
 
+const oauthStateTTL = 15 * time.Minute
+
 // normalizeEmail canonicalizes an email address for storage and comparison.
 func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
@@ -306,7 +308,7 @@ func (s *Server) handleRegisterSeller(w http.ResponseWriter, r *http.Request) {
 
 // handleAuthCallback handles the eBay OAuth callback (BYOK Handshake).
 func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
-	slog.Info("TRACE: /api/auth-callback reached", "url", r.URL.String())
+	slog.Info("oauth callback received")
 
 	// eBay redirects here on the seller's own domain, so there is usually no
 	// session cookie: the single-use state token is what identifies the tenant.
@@ -315,21 +317,18 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 	userID := ""
 	if stateToken != "" {
 		var stateDoc struct {
-			TenantID string `bson:"tenantId"`
+			TenantID  string    `bson:"tenantId"`
+			CreatedAt time.Time `bson:"createdAt"`
 		}
 		if err := s.oauthStatesCol.FindOneAndDelete(r.Context(),
 			bson.M{"state": stateToken}).Decode(&stateDoc); err != nil {
 			slog.Error("oauth state not recognized", "err", err)
+		} else if !time.Now().Before(stateDoc.CreatedAt.Add(oauthStateTTL)) {
+			// MongoDB's TTL monitor runs asynchronously and can leave expired
+			// records behind. Enforce the deadline when the state is consumed.
+			slog.Warn("oauth state expired")
 		} else {
 			userID = stateDoc.TenantID
-		}
-	}
-
-	// Fall back to the session cookie when the callback lands on the frontend
-	// domain (e.g. local development through a single tunnel).
-	if userID == "" {
-		if sessionUser, ok := r.Context().Value("userId").(string); ok {
-			userID = sessionUser
 		}
 	}
 
@@ -340,7 +339,7 @@ func (s *Server) handleAuthCallback(w http.ResponseWriter, r *http.Request) {
 
 	authCode := r.URL.Query().Get("code")
 	if authCode == "" {
-		slog.Error("missing auth code", "query", r.URL.Query().Encode())
+		slog.Error("missing auth code")
 		html.RenderAuthError(w, "missing auth code", frontendURL)
 		return
 	}
